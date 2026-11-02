@@ -1,80 +1,85 @@
 var PluginUpdater = class {
-  constructor(api,active,files){this.api=api;this.active=active;this.files=files;this.running=false;this.busy=false;this.generation=0;this.updated=false;this.failures=0;this.commit='';this.candidate=null;}
+  constructor(api,active,files){this.api=api;this.active=active;this.files=files;this.running=false;this.busy=false;this.generation=0;this.updated=false;this.failures=0;this.etag='';this.candidate=null;}
   start(){
     if(this.running)return;this.running=true;++this.generation;
-    // BetterDiscord must finish marking the newly enabled plugin as running
-    // before its file can trigger a reload.
+    try{(this.files??this.diskFiles()).cleanupLegacyToken?.();}catch(error){this.log('Legacy update credential cleanup',error);}
     this.schedule(3500);
+    this.nativeUpdater=new NativeAutoUpdater(this.api);this.nativeUpdater.start();
   }
-  stop(){this.running=false;++this.generation;clearTimeout(this.timer);this.candidate=null;}
-  schedule(delay=3600000){
+  stop(){this.running=false;++this.generation;clearTimeout(this.timer);this.request?.abort();this.candidate=null;this.nativeUpdater?.stop();}
+  schedule(delay=300000){
     if(!this.running||this.updated)return;clearTimeout(this.timer);
     this.timer=setTimeout(()=>{void this.check();},delay);
   }
+  async download(){
+    const controller=new AbortController();this.request=controller;
+    const timeout=setTimeout(()=>controller.abort(),25000);
+    try{
+      const headers={'Cache-Control':'no-cache',...(this.etag?{'If-None-Match':this.etag}:{})};
+      const url=UPDATE_URL;
+      const options={method:'GET',headers,signal:controller.signal,timeout:20000,redirect:'error',maxRedirects:0,credentials:'omit',cache:'no-store'};
+      const response=await (this.api.Net?.fetch?this.api.Net.fetch(url,options):globalThis.fetch(url,options));
+      if(response.status===304&&this.etag)return {unchanged:true};
+      if(!response.ok)throw Error(`공개 GitHub 다운로드 실패 (HTTP ${response.status}). 잠시 후 자동으로 다시 확인합니다.`);
+      if(Number(response.headers?.get?.('content-length'))>8*1024*1024)throw Error('업데이트 파일이 너무 큽니다.');
+      let source;
+      if(response.body?.getReader){
+        const reader=response.body.getReader(),decoder=new TextDecoder();let bytes=0;source='';
+        try{for(;;){const {done,value}=await reader.read();if(done)break;bytes+=value.byteLength;if(bytes>8*1024*1024)throw Error('업데이트 파일이 너무 큽니다.');source+=decoder.decode(value,{stream:true});}source+=decoder.decode();}
+        catch(error){await reader.cancel().catch(()=>{});throw error;}finally{reader.releaseLock();}
+      }else source=await response.text();
+      if(typeof source!=='string'||source.length>8*1024*1024)throw Error('업데이트 파일 응답이 올바르지 않습니다.');
+      return {source,etag:response.headers?.get?.('etag')??''};
+    }finally{clearTimeout(timeout);if(this.request===controller)this.request=null;}
+  }
   async check(notify=false){
     if(!this.running||this.updated)return;
-    if(this.busy){if(notify)this.toast('업데이트를 확인하고 있습니다. 잠시 기다려 주세요.');this.schedule(3000);return;}
+    if(this.busy){if(notify)this.toast('업데이트를 확인하고 있습니다. 잠시 기다려 주세요.');return;}
     this.busy=true;clearTimeout(this.timer);
     const generation=this.generation,current=()=>this.running&&this.generation===generation;
-    let delay=3600000;
+    let delay=300000;
     try{
       if(this.candidate?.expires<=Date.now())this.candidate=null;
-      if(this.active()){delay=30000;if(notify)this.toast('통화와 방송을 종료하면 30초 이내에 업데이트를 다시 확인합니다.');return;}
-      const bridge=globalThis.CustomVoiceNative;
-      if(!bridge?.getUpdateSource)throw Error('업데이트에는 최신 native 설치와 Discord 완전 재시작이 필요합니다.');
-      const cached=this.candidate;this.candidate=null;
-      const result=cached?.result??await bridge.getUpdateSource(this.commit);
+      const result=this.candidate?.result??await this.download();
       if(!current())return;
-      if(result?.repository!==UPDATE_REPO||!/^([a-f0-9]{40}|[a-f0-9]{64})$/i.test(result.commit??''))throw Error('업데이트 저장소 응답이 올바르지 않습니다.');
-      if(result.unchanged===true){
-        if(!this.commit||result.commit!==this.commit)throw Error('업데이트 버전 응답이 일치하지 않습니다.');
-        this.failures=0;if(notify)this.toast(`CustomVoice ${pluginVersion((this.files??this.diskFiles()).read())}: 저장소에 새 변경이 없습니다.`);return;
+      const files=this.files??this.diskFiles(),previous=files.read(),local=pluginVersion(previous);
+      if(result.unchanged){this.failures=0;if(notify)this.toast(`CustomVoice ${local}: 최신 버전입니다.`);return;}
+      const source=result.source,remote=pluginVersion(source);
+      if(!newerVersion(remote,local)){this.etag=result.etag;this.candidate=null;this.failures=0;if(notify)this.toast(`CustomVoice ${local}: 최신 버전입니다.`);return;}
+      try{new Function('require','module','exports',source);}catch(error){throw Error(error?.name==='SyntaxError'?`CustomVoice ${remote} 파일에 문법 오류가 있어 현재 버전을 유지합니다.`:'다운로드 파일의 문법을 확인할 수 없습니다.');}
+      if(!current())return;
+      // Discover and download updates during a call; only replacement waits.
+      if(this.active()){
+        this.candidate??={result,expires:Date.now()+600000};delay=30000;this.failures=0;
+        if(notify||this.announcedVersion!==remote){this.announcedVersion=remote;this.toast(`CustomVoice ${remote} 다운로드 완료. 통화·방송이 끝나면 자동 적용합니다.`);}
+        return;
       }
-      if(typeof result.source!=='string'||result.source.length>8*1024*1024)throw Error('업데이트 파일 응답이 올바르지 않습니다.');
-      if(this.active()){this.candidate={result,expires:cached?.expires??Date.now()+60000};delay=30000;return;}
-      const source=result.source,remote=pluginVersion(source),files=this.files??this.diskFiles();
-      const previous=files.read(),local=pluginVersion(previous);
-      if(!newerVersion(remote,local)){this.commit=result.commit;this.candidate=null;this.failures=0;if(notify)this.toast(`CustomVoice ${local}: 설치 가능한 새 버전이 없습니다.`);return;}
-      const header=source.match(/^\uFEFF?\s*\/\*\*[\s\S]*?\*\//)?.[0]??'';
-      const required=header.match(/^\s*\*\s*@nativeVersion\s+(\d+\.\d+\.\d+)\s*$/m)?.[1];
-      // Compile the downloaded module body without executing it. A malformed
-      // release must not replace the working plugin and disable it on reload.
-      try{new Function('require','module','exports',source);}catch(error){throw Error(error?.name==='SyntaxError'?`CustomVoice ${remote} 파일에 문법 오류가 있어 업데이트를 적용하지 않았습니다.`:'다운로드 파일의 문법을 확인할 수 없어 현재 플러그인을 유지합니다.');}
-      if(!current())return;
-      if(this.active()){this.candidate={result,expires:cached?.expires??Date.now()+60000};delay=30000;return;}
       files.replace(source,previous);this.updated=true;this.candidate=null;this.failures=0;clearTimeout(this.timer);
-      this.toast(`CustomVoice ${local} → ${remote} 업데이트됨`,'success');
-      if(required&&(!bridge.version||newerVersion(required,bridge.version)))this.toast('새 native도 있습니다. CustomVoice 플러그인 설정에서 native 업데이트를 눌러 주세요.');
+      this.toast(`CustomVoice ${local} → ${remote} 자동 업데이트됨`,'success');
     }catch(error){
       if(current()){
-        this.candidate=null;this.commit='';
-        delay=Math.min(900000,60000*2**Math.min(this.failures++,4));
+        this.candidate=null;this.etag='';delay=Math.min(900000,60000*2**Math.min(this.failures++,4));
         const message=error?.message??String(error);
-        if(this.lastError!==message||Date.now()-(this.lastErrorAt??0)>=900000){this.lastError=message;this.lastErrorAt=Date.now();try{customVoiceLog('warn','[CustomVoice] Plugin update',message);}catch{}}
+        if(this.lastError!==message||Date.now()-(this.lastErrorAt??0)>=900000){this.lastError=message;this.lastErrorAt=Date.now();this.log('Plugin update',message);}
         if(notify)this.toast(message,'error');
       }
     }finally{this.busy=false;if(current())this.schedule(delay);}
   }
+  log(label,error){try{customVoiceLog('warn','[CustomVoice] '+label,error);}catch{}}
   toast(message,type='info'){try{this.api.UI.showToast(message,{type});}catch{}}
   diskFiles(){
     const fs=require('fs'),path=require('path'),file=path.join(this.api.Plugins.folder,'CustomVoice.plugin.js');
     return {
+      cleanupLegacyToken:()=>{const legacy=path.join(this.api.Plugins.folder,'..','data','CustomVoice','github-token.bin');if(fs.existsSync(legacy))fs.unlinkSync(legacy);},
       read:()=>fs.readFileSync(file,'utf8'),
       replace:(source,previous)=>{
-        if(fs.readFileSync(file,'utf8')!==previous)throw Error('다른 작업이 플러그인 파일을 변경했습니다. 다음에 다시 업데이트합니다.');
+        if(fs.readFileSync(file,'utf8')!==previous)throw Error('다른 작업이 플러그인 파일을 변경했습니다. 다음에 다시 확인합니다.');
         const backup=path.join(this.api.Plugins.folder,'..','data','CustomVoice-install-backups','auto-'+Date.now()+'-'+Math.random().toString(16).slice(2));
         fs.mkdirSync(backup,{recursive:true});fs.writeFileSync(path.join(backup,'CustomVoice.plugin.js'),previous,'utf8');
-        // In-place writes preserve the enabled state; renaming over the plugin
-        // can make the file watcher treat it as a removal and disable it.
-        // BetterDiscord exposes a restricted fs facade without descriptor APIs.
-        // writeFileSync overwrites the existing file without a rename/removal.
-        try{
-          fs.writeFileSync(file,source,'utf8');
-          if(fs.readFileSync(file,'utf8')!==source)throw Error('업데이트 파일을 완전히 기록하지 못했습니다. 이전 버전으로 복원합니다.');
-        }
+        try{fs.writeFileSync(file,source,'utf8');if(fs.readFileSync(file,'utf8')!==source)throw Error('업데이트 파일 기록을 확인하지 못했습니다.');}
         catch(error){
           try{fs.writeFileSync(file,previous,'utf8');if(fs.readFileSync(file,'utf8')!==previous)throw Error('Restore failed');}
-          catch{throw Error(`업데이트 파일 복원에 실패했습니다. 백업: ${backup}`);}
+          catch{throw Error(`업데이트 복원에 실패했습니다. 백업: ${backup}`);}
           throw error;
         }
       }
@@ -82,11 +87,42 @@ var PluginUpdater = class {
   }
 };
 
+var NativeAutoUpdater = class {
+  constructor(api){this.api=api;this.running=false;this.busy=false;this.generation=0;this.failures=0;}
+  start(){if(this.running)return;this.running=true;++this.generation;this.schedule(12000);}
+  stop(){this.running=false;++this.generation;clearTimeout(this.timer);}
+  schedule(delay=900000){if(this.running){clearTimeout(this.timer);this.timer=setTimeout(()=>void this.check(),delay);}}
+  async check(){
+    if(!this.running||this.busy)return;this.busy=true;
+    const generation=this.generation,current=()=>this.running&&this.generation===generation;
+    let delay=900000;
+    try{
+      const bridge=globalThis.CustomVoiceNative;
+      if(!bridge?.checkNativeUpdate||!bridge?.prepareNativeUpdate)return;
+      const info=await bridge.checkNativeUpdate();if(!current())return;
+      let pending=info.pending;
+      if(!['downloading','waiting','applying'].includes(pending?.state)&&info.available)pending=await bridge.prepareNativeUpdate();
+      if(!current())return;this.failures=0;
+      if(pending?.state==='waiting'&&this.announcedVersion!==pending.version){
+        this.announcedVersion=pending.version;
+        this.api.UI?.showToast?.(`native ${pending.version} 자동 다운로드 완료. Discord를 완전히 종료하면 업데이트를 적용합니다.`,{type:'info'});
+      }
+      if(pending?.state==='failed')throw Error(pending.message||'native 자동 업데이트 실패');
+    }catch(error){
+      if(current()){delay=Math.min(900000,60000*2**Math.min(this.failures++,4));try{customVoiceLog('warn','[CustomVoice] Native auto update',error.message);}catch{}}
+    }finally{this.busy=false;if(current())this.schedule(delay);}
+  }
+};
+
+function updateCallActive(state,room) {
+  return Boolean(state?.sharing || ['Connecting','Connected','Reconnecting','Disconnecting'].includes(state?.connection) || room?.state && room.state!=='disconnected');
+}
+
 function createNativeUpdatePanel() {
   const element=document.createElement('section');element.className='cv-native-update';
   const heading=document.createElement('h3');heading.textContent='업데이트';
   const description=document.createElement('p');
-  description.textContent='플러그인은 시작 후와 1시간마다 확인합니다. 통화·방송이 끝나면 30초 이내에 다시 확인하고, 연결 실패 시 잠시 후 재시도합니다. native는 아래 버튼을 눌렀을 때만 다운로드합니다.';
+  description.textContent='공개 GitHub에서 플러그인은 시작 후와 5분마다, native는 시작 후와 15분마다 자동으로 확인하고 다운로드합니다. 플러그인은 통화·방송 종료 후 30초 이내에, native는 Discord 완전 종료 후 적용합니다. 연결 실패 시 자동 재시도합니다.';
   const version=document.createElement('p');version.textContent=`현재 native: ${globalThis.CustomVoiceNative?.version??'연결 없음'}`;
   const status=document.createElement('p');status.setAttribute('role','status');status.setAttribute('aria-live','polite');
   const check=document.createElement('button');check.type='button';check.textContent='native 새 버전 확인';
@@ -126,7 +162,7 @@ function createNativeUpdatePanel() {
     try{
       const result=await bridge().checkNativeUpdate();if(disposed||request!==revision)return;info=result;
       status.textContent=result.available?`native ${result.latestVersion} 업데이트가 있습니다.`:'native는 최신 버전입니다.';
-      const required='1.1.12';
+      const required='1.1.13';
       if(newerVersion(required,result.installedVersion)&&newerVersion(required,result.latestVersion))status.textContent=`이 플러그인에 필요한 native ${required}가 정식 릴리스에 아직 없습니다. 전체 ZIP으로 업데이트해 주세요.`;
       if(result.pending&&['downloading','waiting','applying','failed'].includes(result.pending.state))showState(result.pending);
       else {pending=result.pending;clearTimeout(timer);}

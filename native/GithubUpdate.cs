@@ -1,79 +1,72 @@
 using System.Net.Http.Headers;
-using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json;
 
 internal static class GithubUpdate
 {
     internal const string Repository = "awizc/CustomVoice-plugin";
-    static string TokenFile => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "BetterDiscord", "data", "CustomVoice", "github-token.bin");
-    [StructLayout(LayoutKind.Sequential)] struct Blob { public int Length; public nint Data; }
-    [DllImport("crypt32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool CryptProtectData(ref Blob data, string description, nint entropy, nint reserved, nint prompt, uint flags, out Blob output);
-    [DllImport("crypt32.dll", SetLastError = true)] static extern bool CryptUnprotectData(ref Blob data, nint description, nint entropy, nint reserved, nint prompt, uint flags, out Blob output);
-    [DllImport("kernel32.dll")] static extern nint LocalFree(nint memory);
-    static byte[] Protect(byte[] bytes, bool decrypt)
+    internal static void CleanupLegacyCredential()
     {
-        var input = new Blob { Length = bytes.Length, Data = Marshal.AllocHGlobal(bytes.Length) };
-        Blob output = default;
-        try
-        {
-            Marshal.Copy(bytes, 0, input.Data, bytes.Length);
-            bool success = decrypt ? CryptUnprotectData(ref input, 0, 0, 0, 0, 1, out output) : CryptProtectData(ref input, "CustomVoice GitHub", 0, 0, 0, 1, out output);
-            if (!success) throw new System.ComponentModel.Win32Exception();
-            byte[] result = new byte[output.Length]; Marshal.Copy(output.Data, result, 0, result.Length); return result;
-        }
-        finally { Marshal.FreeHGlobal(input.Data); if (output.Data != 0) LocalFree(output.Data); }
-    }
-    internal static void Save()
-    {
-        string token = Console.In.ReadToEnd().Trim();
-        if (token.Length == 0) { if (File.Exists(TokenFile)) File.Delete(TokenFile); Program.Send(new { configured = false }); return; }
-        if (token.Length > 512 || token.Any(c => !char.IsAsciiLetterOrDigit(c) && c != '_')) throw new ArgumentException("GitHub 토큰 형식이 올바르지 않습니다.");
-        Directory.CreateDirectory(Path.GetDirectoryName(TokenFile)!);
-        string temporary = TokenFile + "." + Guid.NewGuid().ToString("N") + ".tmp";
-        try { File.WriteAllBytes(temporary, Protect(Encoding.UTF8.GetBytes(token), false)); File.Move(temporary, TokenFile, true); }
-        finally { if (File.Exists(temporary)) File.Delete(temporary); }
-        Program.Send(new { configured = true });
+        // Only CustomVoice's retired updater credential, never Git credentials.
+        string file = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "BetterDiscord", "data", "CustomVoice", "github-token.bin");
+        try { File.Delete(file); }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
     }
     internal static HttpClient Client()
     {
-        // Public repositories work without credentials. A user-supplied token
-        // remains optional for private access and authenticated rate limits.
-        string? token = File.Exists(TokenFile) ? Encoding.UTF8.GetString(Protect(File.ReadAllBytes(TokenFile), true)) : null;
-        var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(20), MaxResponseContentBufferSize = 8 * 1024 * 1024 };
-        if (!string.IsNullOrWhiteSpace(token)) http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        CleanupLegacyCredential();
+        var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false, UseCookies = false }) { Timeout = TimeSpan.FromMinutes(5) };
         http.DefaultRequestHeaders.UserAgent.ParseAdd("CustomVoice-Updater/" + NativeUpdate.CurrentVersion);
-        http.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");
         http.DefaultRequestHeaders.CacheControl = new CacheControlHeaderValue { NoCache = true };
         return http;
     }
+    internal static bool TrustedDownload(Uri url) => url.IsAbsoluteUri && url.Scheme == "https" && url.IsDefaultPort && url.UserInfo.Length == 0 &&
+        (url.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase) && url.AbsolutePath.StartsWith("/" + Repository + "/releases/", StringComparison.Ordinal) ||
+         url.Host.Equals("release-assets.githubusercontent.com", StringComparison.OrdinalIgnoreCase) ||
+         url.Host.Equals("raw.githubusercontent.com", StringComparison.OrdinalIgnoreCase) && url.AbsolutePath.StartsWith("/" + Repository + "/", StringComparison.Ordinal));
+
+    internal static async Task Download(HttpClient http, Uri url, Stream destination, long maximum, CancellationToken cancellation)
+    {
+        for (int hop = 0; ; hop++)
+        {
+            if (!TrustedDownload(url)) throw new InvalidDataException("GitHub 다운로드 주소가 올바르지 않습니다.");
+            using var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellation);
+            if ((int)response.StatusCode is >= 300 and < 400)
+            {
+                if (hop >= 4 || response.Headers.Location == null) throw new InvalidDataException("GitHub 다운로드 리디렉션이 올바르지 않습니다.");
+                url = new Uri(url, response.Headers.Location); continue;
+            }
+            RequireSuccess(response, "공개 파일 다운로드");
+            if (response.Content.Headers.ContentLength > maximum) throw new InvalidDataException("배포 파일이 허용 크기를 초과합니다.");
+            await using var input = await response.Content.ReadAsStreamAsync(cancellation);
+            byte[] buffer = new byte[65536]; long total = 0; int count;
+            while ((count = await input.ReadAsync(buffer, cancellation)) != 0)
+            {
+                total += count; if (total > maximum) throw new InvalidDataException("배포 파일이 허용 크기를 초과합니다.");
+                await destination.WriteAsync(buffer.AsMemory(0, count), cancellation);
+            }
+            return;
+        }
+    }
     internal static async Task Fetch()
     {
+        // Compatibility for older plugins that still call the native bridge.
         string knownCommit = Console.In.ReadToEnd().Trim();
-        if (knownCommit.Length != 0 && ((knownCommit.Length != 40 && knownCommit.Length != 64) || !knownCommit.All(Uri.IsHexDigit))) throw new InvalidDataException("저장된 업데이트 커밋이 올바르지 않습니다.");
-        using var http = Client();
-        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(40));
-        using var reference = await http.GetAsync($"https://api.github.com/repos/{Repository}/git/ref/heads/main", cancellation.Token);
-        RequireSuccess(reference, "업데이트 조회");
-        using var document = JsonDocument.Parse(await reference.Content.ReadAsStringAsync(cancellation.Token));
-        string commit = document.RootElement.GetProperty("object").GetProperty("sha").GetString()!;
-        if ((commit.Length != 40 && commit.Length != 64) || !commit.All(Uri.IsHexDigit)) throw new InvalidDataException("GitHub commit response is invalid.");
+        if (knownCommit.Length != 0 && ((knownCommit.Length != 40 && knownCommit.Length != 64) || !knownCommit.All(Uri.IsHexDigit))) throw new InvalidDataException("저장된 업데이트 식별자가 올바르지 않습니다.");
+        using var http = Client(); using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(40));
+        using var memory = new MemoryStream();
+        await Download(http, new Uri($"https://raw.githubusercontent.com/{Repository}/main/CustomVoice.plugin.js"), memory, 8 * 1024 * 1024, cancellation.Token);
+        byte[] bytes = memory.ToArray(); string commit = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
         if (commit == knownCommit) { Program.Send(new { commit, repository = Repository, unchanged = true }); return; }
-        using var request = new HttpRequestMessage(HttpMethod.Get, $"https://api.github.com/repos/{Repository}/contents/CustomVoice.plugin.js?ref={commit}");
-        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github.raw+json"));
-        using var response = await http.SendAsync(request, cancellation.Token);
-        RequireSuccess(response, "플러그인 다운로드");
-        Program.Send(new { commit, repository = Repository, source = await response.Content.ReadAsStringAsync(cancellation.Token) });
+        Program.Send(new { commit, repository = Repository, source = Encoding.UTF8.GetString(bytes) });
     }
     internal static void RequireSuccess(HttpResponseMessage response, string action)
     {
         if (response.IsSuccessStatusCode) return;
         string reason = (int)response.StatusCode switch {
-            401 => "GitHub 토큰이 만료되었거나 유효하지 않습니다. 다시 등록하거나, 공개 저장소라면 설정에서 토큰을 삭제해 주세요.",
-            403 when response.Headers.Contains("Retry-After") || response.Headers.TryGetValues("X-RateLimit-Remaining", out var remaining) && remaining.Contains("0") => "GitHub 요청 한도에 도달했습니다. 잠시 후 다시 시도합니다.",
-            403 => "저장소 읽기 권한 또는 조직의 토큰 승인을 확인해 주세요.",
-            404 => "저장소·배포 파일이 없거나 private 저장소 읽기 권한이 없습니다.",
-            429 => "GitHub 요청 한도에 도달했습니다. 잠시 후 다시 시도합니다.",
+            404 => "공개 배포 파일을 찾을 수 없습니다.",
+            403 or 429 => "GitHub 다운로드가 일시적으로 제한되었습니다. 잠시 후 다시 시도합니다.",
             >= 500 => "GitHub 서버가 일시적으로 응답하지 않습니다. 잠시 후 다시 시도합니다.",
             _ => "잠시 후 다시 시도해 주세요."
         };

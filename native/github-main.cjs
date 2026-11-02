@@ -22,10 +22,6 @@ function install(trusted){
     if(!fetching.has(knownCommit))fetching.set(knownCommit,run('--update-source',knownCommit).finally(()=>{fetching.delete(knownCommit);}));
     return fetching.get(knownCommit);
   });
-  ipcMain.handle(prefix+'update-token',(event,token)=>{
-    trusted(event);if(typeof token!=='string'||token.length>512)throw Error('Invalid GitHub token');
-    return run('--store-update-token',token);
-  });
   ipcMain.handle(prefix+'native-update-check',event=>{
     trusted(event);if(!checking)checking=run('--native-update-check').finally(()=>{checking=undefined;});return checking;
   });

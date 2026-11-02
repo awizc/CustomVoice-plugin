@@ -31,7 +31,6 @@ internal static class Program
         Capture? capture = null;
         try
         {
-            if (args.Length == 1 && args[0] == "--store-update-token") { GithubUpdate.Save(); return 0; }
             if (args.Length == 1 && args[0] == "--update-source") { await GithubUpdate.Fetch(); return 0; }
             if (args.Length == 1 && args[0] == "--native-update-check") { await NativeUpdate.Check(); return 0; }
             if (args.Length == 1 && args[0] == "--native-update-prepare") { await NativeUpdate.Prepare(); return 0; }

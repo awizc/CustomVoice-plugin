@@ -76,7 +76,7 @@ internal static class NativeInstaller
         return result;
     }
 
-    internal static string Install(string payloadDirectory, string pluginsDirectory, bool remove = false, bool nativeOnly = false)
+    internal static string Install(string payloadDirectory, string pluginsDirectory, bool remove = false, bool nativeOnly = false, bool requireDiscordExit = false)
     {
         payloadDirectory = Path.GetFullPath(payloadDirectory);
         pluginsDirectory = Path.GetFullPath(pluginsDirectory);
@@ -115,7 +115,7 @@ internal static class NativeInstaller
         if (!archiveChanged && copies.Count == 0) return "이미 설치되어 있습니다.";
         // A short-lived status/download helper can outlive Discord. Detect its
         // file locks before creating backups or changing any installed files.
-        if (nativeOnly)
+        if (nativeOnly || requireDiscordExit)
             foreach (var (_, target) in copies)
                 if (File.Exists(target)) { using var available = new FileStream(target, FileMode.Open, FileAccess.ReadWrite, FileShare.None); }
         string backup = Path.Combine(dataDirectory, "CustomVoice-install-backups", DateTime.Now.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N")[..8]);
@@ -125,7 +125,7 @@ internal static class NativeInstaller
         string temporary = archive + ".customvoice-" + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            if (nativeOnly && DiscordRunning()) throw new IOException("Discord가 다시 실행되어 native 설치를 연기합니다.");
+            if ((nativeOnly || requireDiscordExit) && DiscordRunning()) throw new IOException("Discord가 다시 실행되어 native 설치를 연기합니다.");
             foreach (var (source, target) in copies)
             {
                 string? saved = null;

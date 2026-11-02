@@ -77,14 +77,13 @@ function install({ allowTest = false } = {}) {
     deliver(message);
   });
   contextBridge.exposeInMainWorld('CustomVoiceNative', {
-    protocol: 2, version: '1.1.12', windowCaptureAuto: true, available: Boolean(textures?.importSharedTexture),
+    protocol: 2, version: '1.1.13', windowCaptureAuto: true, available: Boolean(textures?.importSharedTexture),
     listWindowSources: () => ipcRenderer.invoke(prefix + 'window-sources'),
     async audioStart(source){const info=await ipcRenderer.invoke(prefix+'audio-start',source);audioSessions.add(info.session);return info;},
     audioActivate:(id,transport=1)=>ipcRenderer.invoke(prefix+'audio-activate',id,transport),
     audioConsumed:(id,sequence)=>{if(audioSessions.has(id))ipcRenderer.send(prefix+'audio-consumed',id,sequence);},
     audioStop:id=>{audioSessions.delete(id);return ipcRenderer.invoke(prefix+'audio-stop',id);},
     getUpdateSource:(knownCommit='')=>ipcRenderer.invoke(prefix+'update-source',knownCommit),
-    setUpdateToken:token=>ipcRenderer.invoke(prefix+'update-token',token),
     checkNativeUpdate:()=>ipcRenderer.invoke(prefix+'native-update-check'),
     prepareNativeUpdate:()=>ipcRenderer.invoke(prefix+'native-update-prepare'),
     nativeUpdateStatus:()=>ipcRenderer.invoke(prefix+'native-update-status'),
@@ -97,7 +96,7 @@ function install({ allowTest = false } = {}) {
         void ipcRenderer.invoke(prefix + 'stop', info.session).catch(() => {});
         throw new Error('Capture startup was superseded.');
       }
-      active.add(info.session); return { ...info, preloadVersion: '1.1.12' };
+      active.add(info.session); return { ...info, preloadVersion: '1.1.13' };
     },
     activate: (id, boundedDelivery = false) => {
       // Opt in so older renderer bundles remain compatible with this preload.
