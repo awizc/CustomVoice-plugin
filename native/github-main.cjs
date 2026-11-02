@@ -3,7 +3,7 @@ const {ipcMain}=require('electron');
 const {spawn}=require('child_process');
 const path=require('path');
 function install(trusted){
-  const prefix='customvoice-native-v2:';let fetching,checking,preparing;
+  const prefix='customvoice-native-v2:',fetching=new Map();let checking,preparing,polling;
   function run(mode,input='',timeout=45000){
     return new Promise((resolve,reject)=>{
       const child=spawn(path.join(__dirname,'CustomVoice.Capture.exe'),[mode],{windowsHide:true,stdio:['pipe','pipe','pipe']});
@@ -16,10 +16,11 @@ function install(trusted){
       child.stdin.end(input);
     });
   }
-  ipcMain.handle(prefix+'update-source',event=>{
+  ipcMain.handle(prefix+'update-source',(event,knownCommit='')=>{
     trusted(event);
-    if(!fetching)fetching=run('--update-source').finally(()=>{fetching=undefined;});
-    return fetching;
+    if(typeof knownCommit!=='string'||knownCommit&&!/^([a-f0-9]{40}|[a-f0-9]{64})$/i.test(knownCommit))throw Error('Invalid update commit');
+    if(!fetching.has(knownCommit))fetching.set(knownCommit,run('--update-source',knownCommit).finally(()=>{fetching.delete(knownCommit);}));
+    return fetching.get(knownCommit);
   });
   ipcMain.handle(prefix+'update-token',(event,token)=>{
     trusted(event);if(typeof token!=='string'||token.length>512)throw Error('Invalid GitHub token');
@@ -31,6 +32,8 @@ function install(trusted){
   ipcMain.handle(prefix+'native-update-prepare',event=>{
     trusted(event);if(!preparing)preparing=run('--native-update-prepare','',330000).finally(()=>{preparing=undefined;});return preparing;
   });
-  ipcMain.handle(prefix+'native-update-status',event=>{trusted(event);return run('--native-update-status');});
+  ipcMain.handle(prefix+'native-update-status',event=>{
+    trusted(event);if(!polling)polling=run('--native-update-status','',15000).finally(()=>{polling=undefined;});return polling;
+  });
 }
 module.exports={install};

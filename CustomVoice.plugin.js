@@ -1,8 +1,8 @@
 /**
  * @name CustomVoice
  * @author CustomVoice contributors
- * @version 1.1.3
- * @nativeVersion 1.1.1
+ * @version 1.1.5
+ * @nativeVersion 1.1.5
  * @description Independent LiveKit voice channels inside Discord.
  * @source https://github.com/awizc/CustomVoice-plugin
  * @updateUrl https://api.github.com/repos/awizc/CustomVoice-plugin/contents/CustomVoice.plugin.js?ref=main
@@ -32751,10 +32751,19 @@ function discordScreenCapture(pick2 = selectDesktopSource) {
     if (signal.aborted) throw cancelled();
     const bridge = globalThis.DiscordNative?.desktopCapture;
     if (!bridge?.getDesktopCaptureSources || !navigator.mediaDevices?.getUserMedia) {
+      const requestedAudio = options.audio;
       try {
-        return await nativeCapture();
+        // No selected HWND is available in this fallback. Never request an
+        // unidentified/system audio source on behalf of an application share.
+        options.audio = false;
+        const tracks = await nativeCapture();
+        for (const track of tracks) if (track.kind === Track.Kind.Audio) track.stop();
+        if (requestedAudio) globalThis.BdApi?.UI?.showToast("공유 창을 식별할 수 없어 소리 없이 화면만 공유합니다. Discord를 업데이트해 주세요.", { type: "warning" });
+        return tracks.filter(track => track.kind !== Track.Kind.Audio);
       } catch (error62) {
         if (!unsupported(error62)) throw error62;
+      } finally {
+        options.audio = requestedAudio;
       }
       throw new Error(
         "\uC774 Discord \uBC84\uC804\uC5D0\uC11C \uD654\uBA74 \uCEA1\uCC98 API\uB97C \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. Discord\uC640 BetterDiscord\uB97C \uC5C5\uB370\uC774\uD2B8\uD574 \uC8FC\uC138\uC694."
@@ -32799,7 +32808,7 @@ function discordScreenCapture(pick2 = selectDesktopSource) {
           tracks.push(...await capture.captureAudio(signal));
         } catch (error62) {
           if (signal.aborted || error62?.name === "AbortError") throw error62;
-          customVoiceLog("warn", "[CustomVoice] System audio capture failed", error62);
+          customVoiceLog("warn", "[CustomVoice] Share audio capture failed", error62);
           globalThis.BdApi?.UI?.showToast("선택한 대상의 소리를 캡처하지 못해 화면만 공유합니다. 방송의 소리 공유 버튼으로 다시 시도할 수 있습니다.", { type: "warning" });
         }
       }
@@ -32819,11 +32828,12 @@ function discordScreenCapture(pick2 = selectDesktopSource) {
       processAudioModule ??= createProcessAudioModule();
       const raw = await processAudioModule.start(audioSource, signal);
       if (signal.aborted || selectedSource !== audioSource) { raw.stop(); throw cancelled(); }
-      const track = new LocalAudioTrack(raw, void 0, false);
+      const track = new LocalAudioTrack(raw, void 0, true);
       track.source = Track.Source.ScreenShareAudio;
       return [track];
     }
     if (!selectedSource) throw new Error("\uC774 \uD658\uACBD\uC5D0\uC11C\uB294 \uC18C\uB9AC\uB97C \uCD94\uAC00\uD558\uB824\uBA74 \uD654\uBA74 \uACF5\uC720\uB97C \uB2E4\uC2DC \uC2DC\uC791\uD574\uC57C \uD569\uB2C8\uB2E4.");
+    if (!/^screen:[^:]+:\d+$/.test(selectedSource)) throw new Error("공유 대상 종류를 확인할 수 없어 시스템 소리를 캡처하지 않았습니다.");
     // Loopback needs a temporary video track. Avoid opening a second full-size,
     // high-FPS capture just to acquire audio; the published video is untouched.
     const acquire = (lightweight) => navigator.mediaDevices.getUserMedia({
@@ -54288,34 +54298,59 @@ function isTyping(target) {
 function createProcessAudioModule(){
   const sessions=new Set();
   const processor=`class CVProcessAudio extends AudioWorkletProcessor {
-    constructor(){super();this.left=new Float32Array(8192);this.right=new Float32Array(8192);this.read=0;this.write=0;this.count=0;
-      this.port.onmessage=event=>{const pcm=event.data;if(!(pcm instanceof ArrayBuffer)||pcm.byteLength%4||pcm.byteLength>3840)return;const view=new DataView(pcm);
-        for(let i=0;i<pcm.byteLength;i+=4){this.left[this.write]=view.getInt16(i,true)/32768;this.right[this.write]=view.getInt16(i+2,true)/32768;this.write=(this.write+1)%8192;this.count++;}
-        if(this.count>2880){this.count=1920;this.read=(this.write-this.count+8192)%8192;}
+    constructor(){super();this.left=new Float32Array(16384);this.right=new Float32Array(16384);this.read=0;this.write=0;this.count=0;this.started=false;this.ready=false;this.input=0;this.played=0;this.nonzero=0;this.underruns=0;this.elapsed=0;
+      this.port.onmessage=event=>{const {pcm,sequence}=event.data||{};
+        try{if(!pcm||pcm.byteLength%4||pcm.byteLength>19200)throw Error('Invalid process audio packet');const view=new DataView(pcm);
+          for(let i=0;i<pcm.byteLength;i+=4){this.left[this.write]=view.getInt16(i,true)/32768;this.right[this.write]=view.getInt16(i+2,true)/32768;this.write=(this.write+1)%16384;this.count++;}
+          this.input+=pcm.byteLength/4;if(this.count>7680){this.count=4800;this.read=(this.write-this.count+16384)%16384;}
+          this.port.postMessage({type:'consumed',sequence});
+        }catch{this.port.postMessage({type:'error',message:'Audio packet decoding failed'});}
       };
     }
-    process(_inputs,outputs){const out=outputs[0];if(!out?.length)return true;for(let i=0;i<out[0].length;i++){const present=this.count>0;out[0][i]=present?this.left[this.read]:0;if(out[1])out[1][i]=present?this.right[this.read]:0;if(present){this.read=(this.read+1)%8192;this.count--;}}return true;}
+    process(_inputs,outputs){
+      if(!this.ready){this.ready=true;this.port.postMessage({type:'ready'});}
+      const out=outputs[0];if(!out?.length)return true;
+      if(!this.started&&this.count>=960)this.started=true;
+      for(let i=0;i<out[0].length;i++){
+        const present=this.started&&this.count>0,l=present?this.left[this.read]:0,r=present?this.right[this.read]:0;
+        out[0][i]=l;if(out[1])out[1][i]=r;
+        if(present){this.read=(this.read+1)%16384;this.count--;this.played++;if(l!==0||r!==0)this.nonzero++;}else this.underruns++;
+      }
+      if(this.count===0)this.started=false;this.elapsed+=out[0].length;
+      if(this.elapsed>=sampleRate*10){this.port.postMessage({type:'stats',inputFrames:this.input,playedFrames:this.played,nonzeroFrames:this.nonzero,underrunFrames:this.underruns,queuedFrames:this.count});this.input=this.played=this.nonzero=this.underruns=this.elapsed=0;}
+      return true;
+    }
   } registerProcessor('cv-process-audio',CVProcessAudio);`;
   async function start(source,signal){
     const bridge=globalThis.CustomVoiceNative;
-    if(!bridge?.audioStart)throw Error('애플리케이션 소리 캡처는 최신 native 설치와 Discord 완전 재시작이 필요합니다. 전체 시스템 소리는 공유하지 않았습니다.');
+    const log=(level,stage,details)=>{if(typeof customVoiceLog==='function')customVoiceLog(level,'[CustomVoice] Process audio '+stage,details);};
+    if(!/^window:\d+:\d+$/.test(source))throw Error('앱별 소리 캡처에는 선택한 창이 필요합니다.');
+    if(!bridge?.audioStart)throw Error('앱별 소리 캡처용 native가 없습니다. 송출자 PC에 최신 전체 ZIP을 설치한 뒤 Discord를 완전히 재시작해 주세요. 시스템 소리로 대체하지 않습니다.');
     if(signal.aborted)throw new DOMException('Capture cancelled','AbortError');
     const context=new AudioContext({sampleRate:48000,latencyHint:'interactive'});
-    let info,node,destination,track,closed=false,timer;
+    let info,node,destination,track,silentSink,closed=false,timer,readyTimer,readyResolve,readyReject;
+    const ready=new Promise((resolve,reject)=>{readyResolve=resolve;readyReject=reject;});ready.catch(()=>{});
     const origin=location.protocol==='file:'?'null':location.origin;
     const stop=()=>{
-      if(closed)return;closed=true;clearTimeout(timer);signal.removeEventListener('abort',stop);window.removeEventListener('message',message);
+      if(closed)return;closed=true;clearTimeout(timer);clearTimeout(readyTimer);readyReject(new DOMException('Capture cancelled','AbortError'));
+      signal.removeEventListener('abort',stop);window.removeEventListener('message',message);context.onstatechange=null;
       if(track){track.enabled=false;MediaStreamTrack.prototype.stop.call(track);}
-      node?.disconnect();node?.port.close();void context.close().catch(()=>{});
+      if(node){node.onprocessorerror=null;node.port.onmessage=null;node.disconnect();node.port.close();}
+      silentSink?.disconnect();void context.close().catch(()=>{});
       if(info)void bridge.audioStop(info.session).catch(()=>{});sessions.delete(stop);
     };
-    const fail=error=>{stop();track?.dispatchEvent(new Event('ended'));globalThis.BdApi?.UI?.showToast?.(error.message,{type:'warning'});};
+    const fail=error=>{log('warn','failed',{message:error.message});readyReject(error);stop();track?.dispatchEvent(new Event('ended'));globalThis.BdApi?.UI?.showToast?.(error.message,{type:'warning'});};
     function message(event){
       const data=event.data;
       if(event.source!==window||event.origin!==origin||!info||data?.session!==info.session||closed)return;
-      if(data.type==='customvoice-process-audio-error'){fail(Error(data.error));return;}
-      if(data.type!=='customvoice-process-audio'||!(data.pcm instanceof ArrayBuffer))return;
-      try{node.port.postMessage(data.pcm,[data.pcm]);bridge.audioConsumed(info.session,data.sequence);}catch(error){fail(error);}
+      if(data.type==='customvoice-process-audio-error'){fail(Error(data.error||'앱별 오디오 캡처가 중단되었습니다.'));return;}
+      if(data.type==='customvoice-process-audio-status'){log('info','native',{processId:data.processId,frames:data.frames,packets:data.packets,silentFrames:data.silentFrames,droppedFrames:data.droppedFrames});return;}
+      if(data.type!=='customvoice-process-audio')return;
+      try{
+        let pcm=data.pcm;if(ArrayBuffer.isView(pcm))pcm=pcm.buffer.slice(pcm.byteOffset,pcm.byteOffset+pcm.byteLength);
+        if(Object.prototype.toString.call(pcm)!=='[object ArrayBuffer]'||!pcm.byteLength||pcm.byteLength%4||pcm.byteLength>19200)throw Error('앱별 오디오 데이터 형식이 올바르지 않습니다.');
+        node.port.postMessage({pcm,sequence:data.sequence},[pcm]);
+      }catch(error){fail(error);}
     }
     signal.addEventListener('abort',stop,{once:true});window.addEventListener('message',message);sessions.add(stop);
     const url=URL.createObjectURL(new Blob([processor],{type:'text/javascript'}));
@@ -54325,17 +54360,33 @@ function createProcessAudioModule(){
       await context.audioWorklet.addModule(url);
       if(closed)throw new DOMException('Capture cancelled','AbortError');
       node=new AudioWorkletNode(context,'cv-process-audio',{numberOfInputs:0,numberOfOutputs:1,outputChannelCount:[2]});
+      node.onprocessorerror=()=>fail(Error('앱별 오디오 처리기가 중단되었습니다. 소리 공유를 다시 켜 주세요.'));
+      node.port.onmessage=event=>{
+        if(closed)return;const data=event.data;
+        if(data?.type==='ready'){clearTimeout(readyTimer);readyResolve();}
+        else if(data?.type==='consumed'&&info)bridge.audioConsumed(info.session,data.sequence);
+        else if(data?.type==='error')fail(Error(data.message));
+        else if(data?.type==='stats')log('info','output',{...data,contextState:context.state});
+      };
       destination=context.createMediaStreamDestination();node.connect(destination);
+      // A silent output keeps the render graph pulling while WebRTC subscribes
+      // to the MediaStream destination. No captured sound is played locally.
+      silentSink=context.createGain();silentSink.gain.value=0;node.connect(silentSink);silentSink.connect(context.destination);
       track=destination.stream.getAudioTracks()[0];track.stop=stop;
       await Promise.race([resumed,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('오디오 재생 권한을 활성화한 뒤 다시 시도해 주세요.')),5000);})]);
       clearTimeout(timer);
+      readyTimer=setTimeout(()=>readyReject(Error('앱별 오디오 처리기가 시작되지 않았습니다.')),4000);
+      await ready;clearTimeout(readyTimer);
       if(closed)throw new DOMException('Capture cancelled','AbortError');
       info=await bridge.audioStart(source);
       if(closed){await bridge.audioStop(info.session);throw new DOMException('Capture cancelled','AbortError');}
-      await bridge.audioActivate(info.session);
+      if(info.sampleRate!==48000||info.channels!==2)throw Error('앱별 오디오 캡처 형식을 지원하지 않습니다.');
+      context.onstatechange=()=>{if(!closed&&context.state!=='running')log('warn','context',{state:context.state});};
+      await bridge.audioActivate(info.session,2);
       if(closed)throw new DOMException('Capture cancelled','AbortError');
+      log('info','started',{processId:info.processId,windowProcessId:info.windowProcessId,scope:info.scope??'process-tree',sampleRate:info.sampleRate,nativeVersion:bridge.version});
       return track;
-    }catch(error){stop();throw error;}finally{URL.revokeObjectURL(url);}
+    }catch(error){log('warn','startup failed',{message:error.message,nativeVersion:bridge.version});stop();throw error;}finally{URL.revokeObjectURL(url);}
   }
   return {start,stopAll(){for(const stop of [...sessions])stop();}};
 }
@@ -56266,7 +56317,7 @@ function createServerSetup(manager, compat) {
 }
 
 // package.json
-var version3 = "1.1.3";
+var version3 = "1.1.5";
 
 // src/components/settings.ts
 function createSettingsPanel(manager, compat) {
@@ -57325,7 +57376,7 @@ function ShareQuality({ manager }) {
       ? "테두리 숨김이 허용되었습니다. 다른 캡처 앱이 사용 중이면 테두리가 남을 수 있습니다."
       : "");
   const bridge = globalThis.CustomVoiceNative;
-  const restartNotice = bridge && (newerVersion("1.1.1", bridge.version ?? "0.0.0") || captureControl && newerVersion("1.1.1", captureInfo?.hostVersion ?? "0.0.0"))
+  const restartNotice = bridge && (newerVersion("1.1.5", bridge.version ?? "0.0.0") || captureControl && newerVersion("1.1.5", captureInfo?.hostVersion ?? "0.0.0"))
     ? "이전 캡처 연결이 로드되어 있습니다. Discord를 완전히 종료한 뒤 다시 실행하면 최신 개선 사항이 적용됩니다."
     : "";
   const borderToggle = import_react4.default.createElement("label", {
@@ -58740,7 +58791,7 @@ var UPDATE_REPO = "awizc/CustomVoice-plugin";
 var UPDATE_SOURCE = `https://github.com/${UPDATE_REPO}`;
 var UPDATE_URL = `https://api.github.com/repos/${UPDATE_REPO}/contents/CustomVoice.plugin.js?ref=main`;
 function pluginVersion(source) {
-  const header = source.match(/^\/\*\*[\s\S]*?\*\//)?.[0] ?? "";
+  const header = source.match(/^\uFEFF?\s*\/\*\*[\s\S]*?\*\//)?.[0] ?? "";
   if (!/^\s*\*\s*@name\s+CustomVoice\s*$/m.test(header) || !source.includes("module.exports"))
     throw new Error("CustomVoice \uD50C\uB7EC\uADF8\uC778 \uD615\uC2DD\uC774 \uC544\uB2D9\uB2C8\uB2E4.");
   const version4 = header.match(/^\s*\*\s*@version\s+(\d+\.\d+\.\d+)\s*$/m)?.[1];
@@ -58781,59 +58832,81 @@ function readUpdateCommit(advertisement) {
   return commit;
 }
 var PluginUpdater = class {
-  constructor(api,active,files){this.api=api;this.active=active;this.files=files;this.running=false;this.busy=false;this.generation=0;this.updated=false;}
+  constructor(api,active,files){this.api=api;this.active=active;this.files=files;this.running=false;this.busy=false;this.generation=0;this.updated=false;this.failures=0;this.commit='';this.candidate=null;}
   start(){
     if(this.running)return;this.running=true;++this.generation;
     // BetterDiscord must finish marking the newly enabled plugin as running
     // before its file can trigger a reload.
-    this.timer=setTimeout(()=>{void this.check().finally(()=>this.schedule());},3500);
+    this.schedule(3500);
   }
-  stop(){this.running=false;++this.generation;clearTimeout(this.timer);}
-  schedule(){
+  stop(){this.running=false;++this.generation;clearTimeout(this.timer);this.candidate=null;}
+  schedule(delay=3600000){
     if(!this.running||this.updated)return;clearTimeout(this.timer);
-    const next=new Date();next.setHours(next.getHours()+1,0,0,0);
-    this.timer=setTimeout(()=>{void this.check().finally(()=>this.schedule());},next.getTime()-Date.now());
+    this.timer=setTimeout(()=>{void this.check();},delay);
   }
   async check(notify=false){
-    if(!this.running||this.busy||this.updated)return;
-    if(this.active()){if(notify)this.api.UI.showToast('통화와 방송을 종료한 뒤 업데이트할 수 있습니다.',{type:'info'});return;}
-    this.busy=true;const generation=this.generation,current=()=>this.running&&this.generation===generation;
+    if(!this.running||this.updated)return;
+    if(this.busy){if(notify)this.toast('업데이트를 확인하고 있습니다. 잠시 기다려 주세요.');this.schedule(3000);return;}
+    this.busy=true;clearTimeout(this.timer);
+    const generation=this.generation,current=()=>this.running&&this.generation===generation;
+    let delay=3600000;
     try{
+      if(this.candidate?.expires<=Date.now())this.candidate=null;
+      if(this.active()){delay=30000;if(notify)this.toast('통화와 방송을 종료하면 30초 이내에 업데이트를 다시 확인합니다.');return;}
       const bridge=globalThis.CustomVoiceNative;
       if(!bridge?.getUpdateSource)throw Error('private 저장소 업데이트에는 최신 native 설치와 Discord 완전 재시작이 필요합니다.');
-      const result=await bridge.getUpdateSource();
-      if(!current()||this.active())return;
-      if(result.repository!==UPDATE_REPO||typeof result.source!=='string')throw Error('업데이트 저장소 응답이 올바르지 않습니다.');
+      const cached=this.candidate;this.candidate=null;
+      const result=cached?.result??await bridge.getUpdateSource(this.commit);
+      if(!current())return;
+      if(result?.repository!==UPDATE_REPO||!/^([a-f0-9]{40}|[a-f0-9]{64})$/i.test(result.commit??''))throw Error('업데이트 저장소 응답이 올바르지 않습니다.');
+      if(result.unchanged===true){
+        if(!this.commit||result.commit!==this.commit)throw Error('업데이트 버전 응답이 일치하지 않습니다.');
+        this.failures=0;if(notify)this.toast(`CustomVoice ${pluginVersion((this.files??this.diskFiles()).read())}: 저장소에 새 변경이 없습니다.`);return;
+      }
+      if(typeof result.source!=='string'||result.source.length>8*1024*1024)throw Error('업데이트 파일 응답이 올바르지 않습니다.');
+      if(this.active()){this.candidate={result,expires:cached?.expires??Date.now()+60000};delay=30000;return;}
       const source=result.source,remote=pluginVersion(source),files=this.files??this.diskFiles();
       const previous=files.read(),local=pluginVersion(previous);
-      if(!newerVersion(remote,local)){if(notify)this.api.UI.showToast(`CustomVoice ${local}: 최신 버전입니다.`,{type:'info'});return;}
-      const required=source.match(/^\s*\*\s*@nativeVersion\s+(\d+\.\d+\.\d+)\s*$/m)?.[1];
-      if(!current()||this.active())return;
-      files.replace(source,previous);this.updated=true;clearTimeout(this.timer);
-      this.api.UI.showToast(`CustomVoice ${local} → ${remote} 업데이트됨`,{type:'success'});
-      if(required&&(!bridge.version||newerVersion(required,bridge.version)))this.api.UI.showToast('새 native도 있습니다. CustomVoice 플러그인 설정에서 native 업데이트를 눌러 주세요.',{type:'info'});
+      if(!newerVersion(remote,local)){this.commit=result.commit;this.candidate=null;this.failures=0;if(notify)this.toast(`CustomVoice ${local}: 설치 가능한 새 버전이 없습니다.`);return;}
+      const header=source.match(/^\uFEFF?\s*\/\*\*[\s\S]*?\*\//)?.[0]??'';
+      const required=header.match(/^\s*\*\s*@nativeVersion\s+(\d+\.\d+\.\d+)\s*$/m)?.[1];
+      // Compile the downloaded module body without executing it. A malformed
+      // release must not replace the working plugin and disable it on reload.
+      try{new Function('require','module','exports',source);}catch(error){throw Error(error?.name==='SyntaxError'?`CustomVoice ${remote} 파일에 문법 오류가 있어 업데이트를 적용하지 않았습니다.`:'다운로드 파일의 문법을 확인할 수 없어 현재 플러그인을 유지합니다.');}
+      if(!current())return;
+      if(this.active()){this.candidate={result,expires:cached?.expires??Date.now()+60000};delay=30000;return;}
+      files.replace(source,previous);this.updated=true;this.candidate=null;this.failures=0;clearTimeout(this.timer);
+      this.toast(`CustomVoice ${local} → ${remote} 업데이트됨`,'success');
+      if(required&&(!bridge.version||newerVersion(required,bridge.version)))this.toast('새 native도 있습니다. CustomVoice 플러그인 설정에서 native 업데이트를 눌러 주세요.');
     }catch(error){
       if(current()){
-        customVoiceLog('warn','[CustomVoice] Private update',error.message);
-        if(notify)this.api.UI.showToast(error.message,{type:'error'});
+        this.candidate=null;this.commit='';
+        delay=Math.min(900000,60000*2**Math.min(this.failures++,4));
+        const message=error?.message??String(error);
+        if(this.lastError!==message||Date.now()-(this.lastErrorAt??0)>=900000){this.lastError=message;this.lastErrorAt=Date.now();try{customVoiceLog('warn','[CustomVoice] Private update',message);}catch{}}
+        if(notify)this.toast(message,'error');
       }
-    }finally{this.busy=false;}
+    }finally{this.busy=false;if(current())this.schedule(delay);}
   }
+  toast(message,type='info'){try{this.api.UI.showToast(message,{type});}catch{}}
   diskFiles(){
     const fs=require('fs'),path=require('path'),file=path.join(this.api.Plugins.folder,'CustomVoice.plugin.js');
     return {
       read:()=>fs.readFileSync(file,'utf8'),
       replace:(source,previous)=>{
         if(fs.readFileSync(file,'utf8')!==previous)throw Error('다른 작업이 플러그인 파일을 변경했습니다. 다음에 다시 업데이트합니다.');
-        const backup=path.join(this.api.Plugins.folder,'..','data','CustomVoice-install-backups','auto-'+Date.now());
+        const backup=path.join(this.api.Plugins.folder,'..','data','CustomVoice-install-backups','auto-'+Date.now()+'-'+Math.random().toString(16).slice(2));
         fs.mkdirSync(backup,{recursive:true});fs.writeFileSync(path.join(backup,'CustomVoice.plugin.js'),previous,'utf8');
         // In-place writes preserve the enabled state; renaming over the plugin
         // can make the file watcher treat it as a removal and disable it.
         // BetterDiscord exposes a restricted fs facade without descriptor APIs.
         // writeFileSync overwrites the existing file without a rename/removal.
-        try{fs.writeFileSync(file,source,'utf8');}
+        try{
+          fs.writeFileSync(file,source,'utf8');
+          if(fs.readFileSync(file,'utf8')!==source)throw Error('업데이트 파일을 완전히 기록하지 못했습니다. 이전 버전으로 복원합니다.');
+        }
         catch(error){
-          try{fs.writeFileSync(file,previous,'utf8');}
+          try{fs.writeFileSync(file,previous,'utf8');if(fs.readFileSync(file,'utf8')!==previous)throw Error('Restore failed');}
           catch{throw Error(`업데이트 파일 복원에 실패했습니다. 백업: ${backup}`);}
           throw error;
         }
@@ -58846,18 +58919,19 @@ function createNativeUpdatePanel() {
   const element=document.createElement('section');element.className='cv-native-update';
   const heading=document.createElement('h3');heading.textContent='업데이트';
   const description=document.createElement('p');
-  description.textContent='플러그인 파일은 시작 후와 매시간 자동 업데이트합니다. 통화·방송 중에는 적용을 미룹니다. native는 아래 버튼을 눌렀을 때만 다운로드합니다.';
+  description.textContent='플러그인은 시작 후와 1시간마다 확인합니다. 통화·방송이 끝나면 30초 이내에 다시 확인하고, 연결 실패 시 잠시 후 재시도합니다. native는 아래 버튼을 눌렀을 때만 다운로드합니다.';
   const version=document.createElement('p');version.textContent=`현재 native: ${globalThis.CustomVoiceNative?.version??'연결 없음'}`;
   const status=document.createElement('p');status.setAttribute('role','status');status.setAttribute('aria-live','polite');
   const check=document.createElement('button');check.type='button';check.textContent='native 새 버전 확인';
   const install=document.createElement('button');install.type='button';install.textContent='native 업데이트';install.disabled=true;
   element.append(heading,description,version,status,check,install);
-  let disposed=false,busy=false,info,pending,timer;
+  let disposed=false,busy=false,info,pending,timer,revision=0;
   const inProgress=()=>['downloading','waiting','applying'].includes(pending?.state);
   const bridge=()=>{const value=globalThis.CustomVoiceNative;if(!value?.checkNativeUpdate||!value?.prepareNativeUpdate)throw Error('native 업데이트 버튼을 처음 사용하려면 1.1.1 이상의 전체 ZIP 설치와 Discord 완전 재시작이 필요합니다.');return value;};
   function paint(){
     if(disposed)return;
-    version.textContent=`현재 native: ${info?.installedVersion??globalThis.CustomVoiceNative?.version??'연결 없음'}${info?.latestVersion?' / 최신 native: '+info.latestVersion:''}`;
+    const loaded=globalThis.CustomVoiceNative?.version,installed=info?.installedVersion??loaded;
+    version.textContent=`설치된 native: ${installed??'연결 없음'}${info?.latestVersion?' / 배포된 native: '+info.latestVersion:''}${loaded&&installed&&newerVersion(installed,loaded)?' (완전 재시작 필요)':''}`;
     check.disabled=busy;install.disabled=busy||!info?.available||inProgress();
     install.textContent=pending?.state==='waiting'?'Discord 종료 후 적용 예정':'native 업데이트';
   }
@@ -58867,35 +58941,41 @@ function createNativeUpdatePanel() {
     else if(value.state==='downloading')status.textContent='native 배포 파일을 다운로드하고 있습니다…';
     else if(value.state==='applying')status.textContent='native 업데이트를 적용하고 있습니다…';
     else if(value.state==='failed')status.textContent=value.message||'native 업데이트가 중단되었습니다. 다시 시도해 주세요.';
-    else if(value.state==='installed'||value.state==='current')status.textContent=`native ${value.version}: 최신 버전입니다.`;
+    else if(value.state==='installed'||value.state==='current'){
+      const installed=value.version??info?.installedVersion;
+      if(info&&installed){if(!info.installedVersion||newerVersion(installed,info.installedVersion))info.installedVersion=installed;info.available=Boolean(info.latestVersion&&newerVersion(info.latestVersion,info.installedVersion));}
+      status.textContent=`native ${installed??''} 설치됨.${info?.available?' 더 새로운 버전이 있습니다.':''}`;
+    }
     paint();schedule();
   }
-  function schedule(){clearTimeout(timer);if(!disposed&&inProgress())timer=setTimeout(()=>void poll(),3000);}
+  function schedule(){clearTimeout(timer);if(!disposed&&inProgress())timer=setTimeout(()=>void poll(),pending?.state==='waiting'?10000:5000);}
   async function poll(){
-    if(disposed)return;
-    try{showState(await bridge().nativeUpdateStatus());}
-    catch(error){if(!disposed){status.textContent=error.message;schedule();}}
+    if(disposed)return;if(busy){schedule();return;}const request=++revision;
+    try{const value=await bridge().nativeUpdateStatus();if(!disposed&&request===revision)showState(value);}
+    catch(error){if(!disposed&&request===revision){status.textContent=error.message;schedule();}}
   }
   async function refresh(){
-    if(disposed||busy)return;busy=true;paint();status.textContent='GitHub에서 native 버전을 확인하고 있습니다…';
+    if(disposed||busy)return;const request=++revision;clearTimeout(timer);busy=true;paint();status.textContent='GitHub에서 native 버전을 확인하고 있습니다…';
     try{
-      const result=await bridge().checkNativeUpdate();if(disposed)return;info=result;
+      const result=await bridge().checkNativeUpdate();if(disposed||request!==revision)return;info=result;
       status.textContent=result.available?`native ${result.latestVersion} 업데이트가 있습니다.`:'native는 최신 버전입니다.';
-      if(result.pending&&result.pending.state!=='idle'&&!(result.available&&['installed','current'].includes(result.pending.state)))showState(result.pending);
+      const required='1.1.5';
+      if(newerVersion(required,result.installedVersion)&&newerVersion(required,result.latestVersion))status.textContent=`이 플러그인에 필요한 native ${required}가 정식 릴리스에 아직 없습니다. 전체 ZIP으로 업데이트해 주세요.`;
+      if(result.pending&&['downloading','waiting','applying','failed'].includes(result.pending.state))showState(result.pending);
       else {pending=result.pending;clearTimeout(timer);}
-    }catch(error){if(!disposed)status.textContent=error.message;}
-    finally{busy=false;paint();}
+    }catch(error){if(!disposed&&request===revision){info=undefined;status.textContent=error.message;}}
+    finally{busy=false;paint();schedule();}
   }
   check.addEventListener('click',()=>void refresh());
   install.addEventListener('click',async()=>{
     if(disposed||busy||!info?.available||inProgress())return;
-    busy=true;paint();status.textContent='native 배포 파일을 다운로드하고 있습니다…';
-    try{const value=await bridge().prepareNativeUpdate();if(!disposed)showState(value);}
+    const request=++revision;clearTimeout(timer);busy=true;paint();status.textContent='native 배포 파일을 다운로드하고 있습니다…';
+    try{const value=await bridge().prepareNativeUpdate();if(!disposed&&request===revision)showState(value);}
     catch(error){if(!disposed){status.textContent=error.message;pending=undefined;}}
     finally{busy=false;paint();}
   });
   void refresh();
-  return {element,dispose(){disposed=true;clearTimeout(timer);}};
+  return {element,dispose(){disposed=true;++revision;clearTimeout(timer);}};
 }
 
 

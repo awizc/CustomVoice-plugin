@@ -71,7 +71,7 @@ internal static class NativeInstaller
     {
         string root = Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
         string result = Path.GetFullPath(Path.Combine(root, relative));
-        if (Path.IsPathRooted(relative) || !result.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+        if (Path.IsPathRooted(relative) || relative.Contains(':') || !result.StartsWith(root, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("Invalid package file path.");
         return result;
     }
@@ -101,7 +101,7 @@ internal static class NativeInstaller
                     throw new InvalidDataException($"파일이 누락되었거나 손상되었습니다: {name}. 배포 압축 파일을 다시 풀어 주세요.");
                 if (!source.Equals(target, StringComparison.OrdinalIgnoreCase)) copies.Add((source, target));
             }
-            foreach (string required in new[] { "CustomVoice.Capture.exe", "CustomVoice.Capture.dll", "CustomVoice.Capture.runtimeconfig.json", "host-main.cjs", "host-preload.cjs", "coreclr.dll", "hostfxr.dll" })
+            foreach (string required in new[] { "CustomVoice.Capture.exe", "CustomVoice.Capture.dll", "CustomVoice.Capture.runtimeconfig.json", "host-main.cjs", "host-preload.cjs", "audio-main.cjs", "github-main.cjs", "native-version.json", "coreclr.dll", "hostfxr.dll" })
                 if (!names.Contains(required)) throw new InvalidDataException($"배포 폴더에 필요한 파일이 없습니다: {required}");
             string targetManifest = Path.Combine(nativeDirectory, "manifest.json");
             if (!manifestPath.Equals(targetManifest, StringComparison.OrdinalIgnoreCase)) copies.Add((manifestPath, targetManifest));

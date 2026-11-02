@@ -9,6 +9,9 @@ if ($LASTEXITCODE -ne 0) { throw 'Native renderer bundle sync failed' }
 if ($LASTEXITCODE -ne 0) { throw 'Native capture restore failed' }
 & $Dotnet publish $project -c Release --no-restore --self-contained true -o $outputDirectory --verbosity quiet
 if ($LASTEXITCODE -ne 0) { throw 'Native capture build failed' }
+$builtNativeVersion = [regex]::Match([IO.File]::ReadAllText((Join-Path $PSScriptRoot 'NativeUpdate.cs')), 'CurrentVersion\s*=\s*"(\d+\.\d+\.\d+)"').Groups[1].Value
+if (-not $builtNativeVersion) { throw 'Compiled native version metadata is missing' }
+[IO.File]::WriteAllText((Join-Path $outputDirectory 'native-version.json'), (ConvertTo-Json @{ version = $builtNativeVersion }), [Text.UTF8Encoding]::new($false))
 foreach ($file in @('capture.js', 'host-main.cjs', 'host-preload.cjs', 'audio-main.cjs', 'github-main.cjs', 'Install.cmd', 'README.txt')) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination $outputDirectory
 }

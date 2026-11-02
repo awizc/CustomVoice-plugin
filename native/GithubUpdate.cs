@@ -41,23 +41,41 @@ internal static class GithubUpdate
         string token = Encoding.UTF8.GetString(Protect(File.ReadAllBytes(TokenFile), true));
         var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(20), MaxResponseContentBufferSize = 8 * 1024 * 1024 };
         http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
-        http.DefaultRequestHeaders.UserAgent.ParseAdd("CustomVoice-Updater/1.1.1");
+        http.DefaultRequestHeaders.UserAgent.ParseAdd("CustomVoice-Updater/" + NativeUpdate.CurrentVersion);
         http.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");
         http.DefaultRequestHeaders.CacheControl = new CacheControlHeaderValue { NoCache = true };
         return http;
     }
     internal static async Task Fetch()
     {
+        string knownCommit = Console.In.ReadToEnd().Trim();
+        if (knownCommit.Length != 0 && ((knownCommit.Length != 40 && knownCommit.Length != 64) || !knownCommit.All(Uri.IsHexDigit))) throw new InvalidDataException("저장된 업데이트 커밋이 올바르지 않습니다.");
         using var http = Client();
-        using var reference = await http.GetAsync($"https://api.github.com/repos/{Repository}/git/ref/heads/main");
-        if (!reference.IsSuccessStatusCode) throw new InvalidOperationException($"GitHub 업데이트 인증/접근 실패 (HTTP {(int)reference.StatusCode}). 저장소 읽기 권한을 확인해 주세요.");
-        using var document = JsonDocument.Parse(await reference.Content.ReadAsStringAsync());
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(40));
+        using var reference = await http.GetAsync($"https://api.github.com/repos/{Repository}/git/ref/heads/main", cancellation.Token);
+        RequireSuccess(reference, "업데이트 조회");
+        using var document = JsonDocument.Parse(await reference.Content.ReadAsStringAsync(cancellation.Token));
         string commit = document.RootElement.GetProperty("object").GetProperty("sha").GetString()!;
-        if (commit.Length != 40 || !commit.All(Uri.IsHexDigit)) throw new InvalidDataException("GitHub commit response is invalid.");
+        if ((commit.Length != 40 && commit.Length != 64) || !commit.All(Uri.IsHexDigit)) throw new InvalidDataException("GitHub commit response is invalid.");
+        if (commit == knownCommit) { Program.Send(new { commit, repository = Repository, unchanged = true }); return; }
         using var request = new HttpRequestMessage(HttpMethod.Get, $"https://api.github.com/repos/{Repository}/contents/CustomVoice.plugin.js?ref={commit}");
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github.raw+json"));
-        using var response = await http.SendAsync(request);
-        if (!response.IsSuccessStatusCode) throw new InvalidOperationException($"GitHub 파일 다운로드 실패 (HTTP {(int)response.StatusCode}).");
-        Program.Send(new { commit, repository = Repository, source = await response.Content.ReadAsStringAsync() });
+        using var response = await http.SendAsync(request, cancellation.Token);
+        RequireSuccess(response, "플러그인 다운로드");
+        Program.Send(new { commit, repository = Repository, source = await response.Content.ReadAsStringAsync(cancellation.Token) });
+    }
+    internal static void RequireSuccess(HttpResponseMessage response, string action)
+    {
+        if (response.IsSuccessStatusCode) return;
+        string reason = (int)response.StatusCode switch {
+            401 => "GitHub 토큰이 만료되었거나 유효하지 않습니다. 토큰을 다시 등록해 주세요.",
+            403 when response.Headers.Contains("Retry-After") || response.Headers.TryGetValues("X-RateLimit-Remaining", out var remaining) && remaining.Contains("0") => "GitHub 요청 한도에 도달했습니다. 잠시 후 다시 시도합니다.",
+            403 => "저장소 읽기 권한 또는 조직의 토큰 승인을 확인해 주세요.",
+            404 => "저장소·배포 파일이 없거나 private 저장소 읽기 권한이 없습니다.",
+            429 => "GitHub 요청 한도에 도달했습니다. 잠시 후 다시 시도합니다.",
+            >= 500 => "GitHub 서버가 일시적으로 응답하지 않습니다. 잠시 후 다시 시도합니다.",
+            _ => "잠시 후 다시 시도해 주세요."
+        };
+        throw new IOException($"GitHub {action} 실패 (HTTP {(int)response.StatusCode}). {reason}");
     }
 }

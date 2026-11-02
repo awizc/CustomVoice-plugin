@@ -22,6 +22,10 @@ $stage = Join-Path $dist ('CustomVoice-' + $version + '-windows-x64-' + [DateTim
 $nativeTarget = Join-Path $stage 'CustomVoice.native'
 New-Item -ItemType Directory -Path $nativeTarget -Force | Out-Null
 $published = Join-Path $PSScriptRoot 'native/publish'
+$builtStamp = Join-Path $published 'native-version.json'
+if (-not (Test-Path -LiteralPath $builtStamp)) { throw 'Native build metadata is missing. Build without -ReuseNativeBuild.' }
+$builtNativeVersion = ([IO.File]::ReadAllText($builtStamp) | ConvertFrom-Json).version
+if ($builtNativeVersion -ne $nativeVersion) { throw 'Native build version differs from @nativeVersion. Build the matching native version before packaging.' }
 Get-ChildItem -LiteralPath $published -File | Where-Object { $_.Extension -ne '.pdb' -and $_.Name -notin @('install-host.cjs','manifest.json') } | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination $nativeTarget
 }

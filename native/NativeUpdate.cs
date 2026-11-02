@@ -8,14 +8,14 @@ using System.Text.RegularExpressions;
 
 internal static class NativeUpdate
 {
-    internal const string CurrentVersion = "1.1.1";
+    internal const string CurrentVersion = "1.1.5";
     static string Plugins => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "BetterDiscord", "plugins");
     static string Root => Path.Combine(Path.GetDirectoryName(Plugins)!, "data", "CustomVoice", "native-updates");
     static string StateFile => Path.Combine(Root, "status.json");
     internal sealed record State(string state, string? version = null, int pid = 0, long startTicks = 0, string? message = null);
     sealed record Metadata(int schema, string nativeVersion, string packageVersion, string file, string sha256);
     sealed record Release(Metadata Meta, long AssetId);
-    static Version VersionOf(string value) => Regex.IsMatch(value, @"^\d+\.\d+\.\d+$") ? Version.Parse(value) : throw new InvalidDataException("업데이트 버전 정보가 올바르지 않습니다.");
+    static Version VersionOf(string? value) => value != null && Regex.IsMatch(value, @"^\d+\.\d+\.\d+$") && Version.TryParse(value, out var parsed) ? parsed : throw new InvalidDataException("업데이트 버전 정보가 올바르지 않습니다.");
     static string InstalledVersion()
     {
         string file = Path.Combine(Plugins, "CustomVoice.native", "native-version.json");
@@ -34,10 +34,18 @@ internal static class NativeUpdate
     internal static State Status()
     {
         if (!File.Exists(StateFile)) return new("idle");
-        State state = JsonSerializer.Deserialize<State>(File.ReadAllText(StateFile)) ?? new("idle");
-        if (state.state is "downloading" or "waiting" or "applying" && !Alive(state))
-            return state with { state = "failed", message = "이전 업데이트가 중단되었습니다. 새 버전 확인 후 다시 시도해 주세요." };
-        return state;
+        try
+        {
+            // Readers must allow the writer's atomic replacement on Windows.
+            using var input = new FileStream(StateFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            State state = JsonSerializer.Deserialize<State>(input) ?? throw new JsonException("상태 정보가 비어 있습니다.");
+            if (state.state is not ("idle" or "downloading" or "waiting" or "applying" or "failed" or "installed" or "current") || state.version != null && (!Regex.IsMatch(state.version, @"^\d+\.\d+\.\d+$") || !Version.TryParse(state.version, out _))) throw new JsonException("알 수 없는 업데이트 상태입니다.");
+            if (state.state is "downloading" or "waiting" or "applying" && !Alive(state))
+                return state with { state = "failed", message = "이전 업데이트가 중단되었습니다. 새 버전 확인 후 다시 시도해 주세요." };
+            return state;
+        }
+        catch (Exception error) when (error is JsonException or IOException or UnauthorizedAccessException)
+        { return new("failed", message: "업데이트 상태 파일을 읽지 못했습니다. 새 버전 확인 후 다시 업데이트하면 상태를 새로 기록합니다."); }
     }
     static void Save(State state)
     {
@@ -73,7 +81,7 @@ internal static class NativeUpdate
                     throw new InvalidDataException("GitHub 배포 파일의 다운로드 주소가 올바르지 않습니다.");
                 response.Dispose(); response = await anonymous.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellation);
             }
-            if (!response.IsSuccessStatusCode) throw new IOException($"GitHub 배포 파일 다운로드 실패 (HTTP {(int)response.StatusCode}).");
+            GithubUpdate.RequireSuccess(response, "배포 파일 다운로드");
             if (response.Content.Headers.ContentLength > maximum) throw new InvalidDataException("배포 파일이 허용 크기를 초과합니다.");
             await using var input = await response.Content.ReadAsStreamAsync(cancellation);
             byte[] buffer = new byte[65536]; long total = 0; int count;
@@ -88,7 +96,7 @@ internal static class NativeUpdate
     static async Task<Release> Latest(HttpClient http, CancellationToken cancellation)
     {
         using var response = await http.GetAsync($"https://api.github.com/repos/{GithubUpdate.Repository}/releases/latest", cancellation);
-        if (!response.IsSuccessStatusCode) throw new IOException($"GitHub 릴리스 조회 실패 (HTTP {(int)response.StatusCode}). 저장소 읽기 권한을 확인해 주세요.");
+        GithubUpdate.RequireSuccess(response, "릴리스 조회");
         using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellation));
         var release = document.RootElement;
         if (release.GetProperty("draft").GetBoolean() || release.GetProperty("prerelease").GetBoolean()) throw new InvalidDataException("정식 릴리스가 아닙니다.");
@@ -109,8 +117,9 @@ internal static class NativeUpdate
     {
         using var http = GithubUpdate.Client(); using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(40));
         var release = await Latest(http, cancellation.Token);
-        Program.Send(new { installedVersion = CurrentVersion, latestVersion = release.Meta.nativeVersion,
-            available = VersionOf(release.Meta.nativeVersion) > VersionOf(CurrentVersion), pending = Status(),
+        string installed = InstalledVersion();
+        Program.Send(new { installedVersion = installed, latestVersion = release.Meta.nativeVersion,
+            available = VersionOf(release.Meta.nativeVersion) > VersionOf(installed), pending = Status(),
             releaseUrl = $"https://github.com/{GithubUpdate.Repository}/releases/tag/v{release.Meta.packageVersion}" });
     }
     static string Within(string directory, string relative)
@@ -144,7 +153,7 @@ internal static class NativeUpdate
             using var file = File.OpenRead(Within(payload, name));
             if (!Convert.ToHexString(SHA256.HashData(file)).Equals(item.GetProperty("sha256").GetString(), StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("native 배포 파일이 손상되었습니다.");
         }
-        foreach (string name in new[] { "CustomVoice.Capture.exe", "CustomVoice.Capture.dll", "host-main.cjs", "host-preload.cjs", "github-main.cjs", "native-version.json" })
+        foreach (string name in new[] { "CustomVoice.Capture.exe", "CustomVoice.Capture.dll", "CustomVoice.Capture.runtimeconfig.json", "coreclr.dll", "hostfxr.dll", "host-main.cjs", "host-preload.cjs", "audio-main.cjs", "github-main.cjs", "native-version.json" })
             if (!names.Contains(name)) throw new InvalidDataException("native 배포 파일이 누락되었습니다.");
         using var stamp = JsonDocument.Parse(File.ReadAllText(Path.Combine(payload, "native-version.json")));
         if (stamp.RootElement.GetProperty("version").GetString() != version) throw new InvalidDataException("native 배포 버전이 일치하지 않습니다.");
@@ -156,12 +165,18 @@ internal static class NativeUpdate
         catch (IOException) { var state = Status(); if (state.state is "downloading" or "waiting" or "applying") { Program.Send(state); return; } throw new IOException("native 업데이트가 진행 중입니다. 잠시 후 다시 시도해 주세요."); }
         using (operation)
         {
+            // The prepared worker may not have taken operation.lock yet. Its
+            // live status closes that handoff gap for concurrent Discord apps.
+            var existing = Status();
+            if (existing.state is "downloading" or "waiting" or "applying") { Program.Send(existing); return; }
+            CleanupJobs();
             string? version = null;
             try
             {
                 using var http = GithubUpdate.Client(); using var cancellation = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+                Save(Owned("downloading", null));
                 var release = await Latest(http, cancellation.Token); version = release.Meta.nativeVersion;
-                if (VersionOf(version) <= VersionOf(InstalledVersion())) { Program.Send(new State("current", InstalledVersion())); return; }
+                if (VersionOf(version) <= VersionOf(InstalledVersion())) { var current = new State("current", InstalledVersion()); Save(current); Program.Send(current); return; }
                 Save(Owned("downloading", version));
                 string job = Path.Combine(Root, Guid.NewGuid().ToString("N")); Directory.CreateDirectory(job);
                 string zip = Path.Combine(job, "package.zip"), unpacked = Path.Combine(job, "payload");
@@ -186,9 +201,44 @@ internal static class NativeUpdate
             catch (Exception error) { Save(new("failed", version, message: error.Message)); throw; }
         }
     }
+    static void CleanupJobs()
+    {
+        // Only our GUID-named staging folders, never installation backups or
+        // an active operation. Keep the two newest and at least seven days.
+        try
+        {
+            string root = Path.GetFullPath(Root).TrimEnd(Path.DirectorySeparatorChar);
+            var jobs = new DirectoryInfo(root).GetDirectories().Where(d => Regex.IsMatch(d.Name, "^[a-f0-9]{32}$"))
+                .OrderByDescending(d => d.LastWriteTimeUtc).Skip(2);
+            foreach (var job in jobs)
+            {
+                if (job.LastWriteTimeUtc > DateTime.UtcNow.AddDays(-7) || !string.Equals(job.Parent?.FullName, root, StringComparison.OrdinalIgnoreCase)) continue;
+                try
+                {
+                    bool links = false; var directories = new Stack<DirectoryInfo>(); directories.Push(job);
+                    while (directories.Count != 0 && !links)
+                    {
+                        var directory = directories.Pop();
+                        if ((directory.Attributes & FileAttributes.ReparsePoint) != 0) { links = true; break; }
+                        foreach (var entry in directory.EnumerateFileSystemInfos())
+                        {
+                            if ((entry.Attributes & FileAttributes.ReparsePoint) != 0) { links = true; break; }
+                            if (entry is DirectoryInfo child) directories.Push(child);
+                        }
+                    }
+                    if (!links) Directory.Delete(job.FullName, true);
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
     internal static async Task<int> ApplyAfterExit()
     {
         string? version = null;
+        bool ownsState = false;
         try
         {
             string payload = Path.GetFullPath(AppContext.BaseDirectory).TrimEnd(Path.DirectorySeparatorChar);
@@ -203,6 +253,9 @@ internal static class NativeUpdate
             if (operation == null) throw new IOException("다른 native 업데이트가 진행 중입니다.");
             using (operation)
             {
+                var existing = Status();
+                if (existing.state is "downloading" or "waiting" or "applying" && existing.pid != Environment.ProcessId) return 0;
+                ownsState = true;
                 Save(Owned("waiting", version, "Discord 완전 종료 후 native를 자동으로 적용합니다."));
                 var deadline = DateTime.UtcNow.AddHours(24);
                 int retries = 0;
@@ -225,7 +278,9 @@ internal static class NativeUpdate
         }
         catch (Exception error)
         {
-            try { Save(new("failed", version, message: error.Message)); } catch { }
+            // A second or incorrectly launched worker must not replace another
+            // live operation's status with its own failure.
+            try { if (ownsState || Status().pid == Environment.ProcessId) Save(new("failed", version, message: error.Message)); } catch { }
             return 1;
         }
     }

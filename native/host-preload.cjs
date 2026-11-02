@@ -14,12 +14,18 @@ function install({ allowTest = false } = {}) {
     const { type, ...details } = message;
     window.postMessage({ ...details, type: 'customvoice-native-status-v2', event: message.event ?? type }, targetOrigin);
   }
-  ipcRenderer.on(prefix+'audio-status',(_event,message)=>{if(audioSessions.has(message.session))window.postMessage({...message,type:'customvoice-process-audio-error'},targetOrigin);});
+  ipcRenderer.on(prefix+'audio-status',(_event,message)=>{if(audioSessions.has(message.session))window.postMessage({...message,type:message.event==='stats'?'customvoice-process-audio-status':'customvoice-process-audio-error'},targetOrigin);});
   ipcRenderer.on(prefix+'audio-frame',(_event,message)=>{
     if(!audioSessions.has(message.session)){ipcRenderer.send(prefix+'audio-consumed',message.session,message.sequence);return;}
-    const bytes=message.pcm;
-    const pcm=bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength);
-    window.postMessage({type:'customvoice-process-audio',session:message.session,sequence:message.sequence,pcm},targetOrigin,[pcm]);
+    try{
+      const bytes=message.pcm;
+      if(!ArrayBuffer.isView(bytes)||bytes.byteLength!==message.frames*4||bytes.byteLength>19200)throw Error('Invalid audio transport packet');
+      const pcm=bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength);
+      window.postMessage({type:'customvoice-process-audio',session:message.session,sequence:message.sequence,pcm},targetOrigin,[pcm]);
+    }catch(error){
+      window.postMessage({type:'customvoice-process-audio-error',session:message.session,error:error.message},targetOrigin);
+      audioSessions.delete(message.session);void ipcRenderer.invoke(prefix+'audio-stop',message.session).catch(()=>{});
+    }
   });
   ipcRenderer.on(prefix + 'status', (_event, message) => { if (active.has(message.session)) status(message); });
   const releaseMessage = message => ipcRenderer.send(prefix + 'release', message.session, message.slot, message.sequence);
@@ -71,12 +77,12 @@ function install({ allowTest = false } = {}) {
     deliver(message);
   });
   contextBridge.exposeInMainWorld('CustomVoiceNative', {
-    protocol: 2, version: '1.1.1', available: Boolean(textures?.importSharedTexture),
+    protocol: 2, version: '1.1.5', available: Boolean(textures?.importSharedTexture),
     async audioStart(source){const info=await ipcRenderer.invoke(prefix+'audio-start',source);audioSessions.add(info.session);return info;},
-    audioActivate:id=>ipcRenderer.invoke(prefix+'audio-activate',id),
+    audioActivate:(id,transport=1)=>ipcRenderer.invoke(prefix+'audio-activate',id,transport),
     audioConsumed:(id,sequence)=>{if(audioSessions.has(id))ipcRenderer.send(prefix+'audio-consumed',id,sequence);},
     audioStop:id=>{audioSessions.delete(id);return ipcRenderer.invoke(prefix+'audio-stop',id);},
-    getUpdateSource:()=>ipcRenderer.invoke(prefix+'update-source'),
+    getUpdateSource:(knownCommit='')=>ipcRenderer.invoke(prefix+'update-source',knownCommit),
     setUpdateToken:token=>ipcRenderer.invoke(prefix+'update-token',token),
     checkNativeUpdate:()=>ipcRenderer.invoke(prefix+'native-update-check'),
     prepareNativeUpdate:()=>ipcRenderer.invoke(prefix+'native-update-prepare'),
@@ -90,7 +96,7 @@ function install({ allowTest = false } = {}) {
         void ipcRenderer.invoke(prefix + 'stop', info.session).catch(() => {});
         throw new Error('Capture startup was superseded.');
       }
-      active.add(info.session); return { ...info, preloadVersion: '1.1.1' };
+      active.add(info.session); return { ...info, preloadVersion: '1.1.5' };
     },
     activate: (id, boundedDelivery = false) => {
       // Opt in so older renderer bundles remain compatible with this preload.
