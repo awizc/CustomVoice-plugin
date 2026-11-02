@@ -120,13 +120,13 @@ function updateCallActive(state,room) {
 
 function createNativeUpdatePanel() {
   const element=document.createElement('section');element.className='cv-native-update';
-  const heading=document.createElement('h3');heading.textContent='업데이트';
+  const heading=document.createElement('h3');heading.textContent='캡처 구성요소';
   const description=document.createElement('p');
   description.textContent='공개 GitHub에서 플러그인은 시작 후와 5분마다, native는 시작 후와 15분마다 자동으로 확인하고 다운로드합니다. 플러그인은 통화·방송 종료 후 30초 이내에, native는 Discord 완전 종료 후 적용합니다. 연결 실패 시 자동 재시도합니다.';
   const version=document.createElement('p');version.textContent=`현재 native: ${globalThis.CustomVoiceNative?.version??'연결 없음'}`;
   const status=document.createElement('p');status.setAttribute('role','status');status.setAttribute('aria-live','polite');
-  const check=document.createElement('button');check.type='button';check.textContent='native 새 버전 확인';
-  const install=document.createElement('button');install.type='button';install.textContent='native 업데이트';install.disabled=true;
+  const check=document.createElement('button');check.type='button';check.textContent='새 버전 확인';
+  const install=document.createElement('button');install.type='button';install.textContent='구성요소 업데이트';install.disabled=true;
   element.append(heading,description,version,status,check,install);
   let disposed=false,busy=false,info,pending,timer,revision=0;
   const inProgress=()=>['downloading','waiting','applying'].includes(pending?.state);
@@ -136,7 +136,7 @@ function createNativeUpdatePanel() {
     const loaded=globalThis.CustomVoiceNative?.version,installed=info?.installedVersion??loaded;
     version.textContent=`설치된 native: ${installed??'연결 없음'}${info?.latestVersion?' / 배포된 native: '+info.latestVersion:''}${loaded&&installed&&newerVersion(installed,loaded)?' (완전 재시작 필요)':''}`;
     check.disabled=busy;install.disabled=busy||!info?.available||inProgress();
-    install.textContent=pending?.state==='waiting'?'Discord 종료 후 적용 예정':'native 업데이트';
+    install.textContent=pending?.state==='waiting'?'Discord 종료 후 적용 예정':'구성요소 업데이트';
   }
   function showState(value){
     pending=value;if(disposed)return;

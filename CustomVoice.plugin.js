@@ -1,7 +1,7 @@
 /**
  * @name CustomVoice
  * @author CustomVoice contributors
- * @version 1.1.17
+ * @version 1.1.18
  * @nativeVersion 1.1.13
  * @description Independent LiveKit voice channels inside Discord.
  * @source https://github.com/awizc/CustomVoice-plugin
@@ -32618,11 +32618,16 @@ function selectDesktopSource(sources, signal, options, refreshSources) {
     dialog.setAttribute("aria-label", "\uD654\uBA74 \uACF5\uC720 \uB300\uC0C1 \uC120\uD0DD");
     const style = document.createElement("style");
     style.textContent = `
-.cv-share-picker{box-sizing:border-box;width:min(864px,calc(100vw - 48px));max-height:calc(100vh - 64px);padding:22px;border:1px solid var(--background-modifier-accent,#44454c);border-radius:12px;background:var(--background-floating,#36373f);color:var(--text-normal,#f2f3f5);font:14px var(--font-primary,"gg sans",Arial,sans-serif);overflow:auto;box-shadow:0 16px 48px #0006;color-scheme:dark}
-.cv-share-picker[open]{display:flex;flex-direction:column}.cv-share-picker::backdrop{background:#000b}.cv-share-picker *{box-sizing:border-box}.cv-share-picker button{font:inherit;color:inherit;border:0;cursor:pointer}.cv-share-picker button:focus-visible{outline:2px solid var(--brand-500,#5865f2);outline-offset:3px}
-.cv-share-tabs{flex-shrink:0;display:flex;background:var(--background-secondary-alt,#292a30);padding:4px;border-radius:10px;gap:4px;margin-bottom:22px}.cv-share-tabs button{display:flex;align-items:center;justify-content:center;gap:6px;flex:1;padding:7px 12px;border-radius:7px;background:transparent;color:var(--text-muted,#b5bac1);font-weight:500}.cv-share-tabs button[aria-selected=true]{background:var(--background-modifier-selected,#393a42);color:var(--text-normal,#f2f3f5)}
-.cv-share-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:22px 14px;grid-auto-rows:max-content;min-height:0;overflow:auto;padding:2px;flex:1}.cv-share-source{background:transparent;padding:0;text-align:left;min-width:0;border-radius:8px}.cv-share-preview{display:flex;align-items:center;justify-content:center;width:100%;aspect-ratio:16/9;background:#000;border-radius:8px;overflow:hidden;border:2px solid transparent}.cv-share-preview img{width:100%;height:100%;object-fit:contain}.cv-share-source:hover .cv-share-preview{border-color:var(--brand-500,#5865f2)}.cv-share-caption{display:flex;align-items:center;gap:6px;font-weight:500;font-size:12px;padding-top:7px}.cv-share-caption img{width:16px;height:16px;object-fit:contain}.cv-share-caption span{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.cv-share-placeholder{color:#b5bac1;font-size:13px}.cv-share-empty{grid-column:1/-1;color:var(--text-muted,#b5bac1);text-align:center;padding:64px 12px}.cv-share-footer{flex-shrink:0;margin-top:28px;font-weight:600}.cv-share-footer small{display:block;margin-top:4px;font-size:12px;font-weight:400;color:var(--text-muted,#b5bac1)}
-@media(max-width:560px){.cv-share-picker{padding:16px;width:calc(100vw - 24px)}.cv-share-grid{grid-template-columns:1fr}}
+.cv-share-picker{box-sizing:border-box;width:min(864px,calc(100vw - 32px));max-height:calc(100dvh - 32px);padding:20px;border:1px solid var(--border-subtle,var(--background-modifier-accent,#ffffff14));border-radius:12px;background:var(--background-primary,#313338);color:var(--text-default,var(--text-normal,#dbdee1));font:400 14px/20px var(--font-primary,"gg sans","Noto Sans",sans-serif);overflow:auto;box-shadow:var(--elevation-high,0 16px 48px #0006);color-scheme:inherit}
+.cv-share-picker[open]{display:flex;flex-direction:column}.cv-share-picker::backdrop{background:#0009}.cv-share-picker *{box-sizing:border-box}.cv-share-picker :is(button,input,select){font:inherit;color:inherit}.cv-share-picker button{border:0;cursor:pointer}.cv-share-picker button:disabled{opacity:.5;cursor:default}.cv-share-picker :is(button,input,select):focus-visible{outline:2px solid var(--focus-primary,var(--brand-500,#5865f2));outline-offset:2px}.cv-share-picker svg{display:block;flex:none}
+.cv-share-header{display:flex;align-items:flex-start;gap:16px;flex-shrink:0;margin-bottom:20px}.cv-share-header>div{flex:1;min-width:0}.cv-share-header h2{font:600 20px/28px var(--font-display,var(--font-primary,"gg sans",sans-serif));margin:0;color:var(--header-primary,#f2f3f5)}.cv-share-header p{margin:4px 0 0;color:var(--text-secondary,var(--text-muted,#949ba4));font-size:13px;line-height:20px}.cv-share-close{display:grid;place-items:center;flex:none;width:32px;height:32px;padding:6px;border-radius:4px;background:transparent}.cv-share-close:hover{background:var(--background-modifier-hover,#ffffff0a)}
+.cv-share-tabs{flex-shrink:0;display:flex;border-bottom:1px solid var(--border-subtle,#ffffff14);gap:16px;margin-bottom:16px}.cv-share-tabs button{display:flex;align-items:center;justify-content:center;gap:8px;min-height:40px;padding:8px 4px;border-bottom:2px solid transparent;background:transparent;color:var(--text-muted,#949ba4);font-weight:500}.cv-share-tabs button[aria-selected=true]{border-bottom-color:var(--brand-500,#5865f2);color:var(--header-primary,#f2f3f5)}.cv-share-tabs button:hover{color:var(--header-primary,#f2f3f5)}
+.cv-share-search{width:100%;flex-shrink:0;min-height:36px;margin:0 0 16px;padding:8px 12px;border:1px solid var(--border-subtle,#ffffff14);border-radius:4px;background:var(--input-background,#1e1f22)}.cv-share-search::placeholder{color:var(--text-muted,#949ba4)}
+.cv-share-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;grid-auto-rows:max-content;min-height:100px;overflow:auto;padding:4px;flex:1;overscroll-behavior:contain;scrollbar-width:thin}.cv-share-source{background:transparent;padding:0;text-align:left;min-width:0;border-radius:8px}.cv-share-preview{display:flex;align-items:center;justify-content:center;width:100%;aspect-ratio:16/9;background:#111214;border-radius:8px;overflow:hidden;border:2px solid transparent}.cv-share-preview img{display:block;width:100%;height:100%;object-fit:contain}.cv-share-source:hover .cv-share-preview,.cv-share-source:focus-visible .cv-share-preview{border-color:var(--brand-500,#5865f2)}.cv-share-caption{display:grid;grid-template-columns:20px minmax(0,1fr);align-items:center;gap:8px;font-weight:500;font-size:14px;line-height:20px;padding-top:8px;min-height:28px}.cv-share-caption img{display:block;width:20px;height:20px;object-fit:contain}.cv-share-caption span{grid-column:2;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.cv-share-placeholder{color:#b5bac1;font-size:13px;line-height:20px;text-align:center;padding:16px}.cv-share-empty{grid-column:1/-1;color:var(--text-muted,#949ba4);text-align:center;padding:32px 12px;line-height:20px}
+.cv-share-refresh{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;flex-shrink:0;margin-top:12px}.cv-share-refresh button{padding:8px 12px;min-height:36px;border-radius:4px;background:var(--background-modifier-hover,#ffffff0a);flex:none}.cv-share-refresh button:hover{background:var(--background-modifier-selected,#ffffff12)}.cv-share-refresh [role=status]{flex:1;min-width:160px;font-size:12px;line-height:18px;color:var(--text-muted,#949ba4)}
+.cv-share-footer{display:grid;grid-template-columns:1fr 1fr;gap:12px;flex-shrink:0;margin-top:16px;padding-top:16px;border-top:1px solid var(--border-subtle,#ffffff14);font-weight:500}.cv-share-footer h3{grid-column:1/-1;font-size:16px;line-height:24px;margin:0}.cv-share-footer>small,.cv-share-footer>div{grid-column:1/-1}.cv-share-footer small{display:block;font-size:12px;line-height:18px;font-weight:400;color:var(--text-muted,#949ba4)}.cv-share-footer>label{display:grid;gap:6px;min-width:0}.cv-share-footer select{width:100%;min-height:36px;margin:0;padding:6px 10px;border:1px solid var(--border-subtle,#ffffff14);border-radius:4px;background:var(--input-background,#1e1f22);color:inherit}.cv-share-footer>.cv-share-audio{display:flex;align-items:center;gap:8px;grid-column:1/-1;min-height:28px}.cv-share-audio input{flex:none;width:20px;height:20px;margin:0;accent-color:var(--brand-500,#5865f2)}
+@media(max-width:560px){.cv-share-picker{padding:16px;width:calc(100vw - 24px)}.cv-share-grid{grid-template-columns:1fr;max-height:40dvh}.cv-share-header{margin-bottom:12px}}
+@media(max-height:650px){.cv-share-picker{overflow:auto}.cv-share-grid{flex:0 0 auto;max-height:35dvh}.cv-share-header p{display:none}}
 `;
     dialog.append(style);
     let settled = false;
@@ -32636,6 +32641,21 @@ function selectDesktopSource(sources, signal, options, refreshSources) {
       else reject(cancelled());
     };
     const abort = () => finish();
+    const header = document.createElement("header"); header.className = "cv-share-header";
+    const intro = document.createElement("div");
+    const title = document.createElement("h2"); title.textContent = "화면 공유";
+    const subtitle = document.createElement("p"); subtitle.textContent = "공유할 창을 선택하면 방송을 시작합니다.";
+    intro.append(title, subtitle);
+    const close = document.createElement("button"); close.type = "button"; close.className = "cv-share-close";
+    close.setAttribute("aria-label", "화면 공유 선택창 닫기"); close.title = "닫기 (Esc)"; close.onclick = () => finish();
+    const closeIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    closeIcon.setAttribute("viewBox", "0 0 24 24"); closeIcon.setAttribute("width", "20"); closeIcon.setAttribute("height", "20"); closeIcon.setAttribute("aria-hidden", "true");
+    const closePath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    closePath.setAttribute("d", "M6 6l12 12M6 18 18 6"); closePath.setAttribute("stroke", "currentColor"); closePath.setAttribute("stroke-width", "2"); closePath.setAttribute("stroke-linecap", "round");
+    closeIcon.append(closePath); close.append(closeIcon); header.append(intro, close); dialog.append(header);
+    const search = document.createElement("input"); search.className = "cv-share-search"; search.type = "search";
+    search.placeholder = "창 이름으로 검색"; search.setAttribute("aria-label", "공유할 창 또는 화면 검색");
+    let updateSourceHelp = () => {};
     const tabs = document.createElement("div");
     tabs.className = "cv-share-tabs";
     tabs.setAttribute("role", "tablist");
@@ -32648,6 +32668,7 @@ function selectDesktopSource(sources, signal, options, refreshSources) {
     let selectedType = sources.some(source => source.id.startsWith('window:')) ? 'window' : 'screen';
     const render = (type) => {
       selectedType = type;
+      updateSourceHelp(type);
       grid.replaceChildren();
       for (const tab of tabButtons) {
         const active = tab.dataset.type === type;
@@ -32656,12 +32677,13 @@ function selectDesktopSource(sources, signal, options, refreshSources) {
         if (active) grid.setAttribute("aria-labelledby", tab.id);
       }
       const filtered = sources.filter(
-        (source) => source.id.startsWith(`${type}:`)
+        (source) => source.id.startsWith(`${type}:`) && String(source.name ?? "").toLocaleLowerCase().includes((search.value || "").trim().toLocaleLowerCase())
       );
       if (!filtered.length) {
         const empty = document.createElement("p");
         empty.className = "cv-share-empty";
         empty.textContent = type === "window" ? "\uACF5\uC720\uD560 \uC560\uD50C\uB9AC\uCF00\uC774\uC158\uC774 \uC5C6\uC2B5\uB2C8\uB2E4." : "\uACF5\uC720\uD560 \uD654\uBA74\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.";
+        if ((search.value || "").trim()) empty.textContent = "일치하는 창이 없습니다. 검색어를 바꾸거나 목록을 새로고침해 주세요.";
         grid.append(empty);
       }
       for (const source of filtered) {
@@ -32746,16 +32768,15 @@ function selectDesktopSource(sources, signal, options, refreshSources) {
       tabButtons.push(tab);
       tabs.append(tab);
     }
-    dialog.append(tabs, grid);
+    search.oninput = () => render(selectedType);
+    dialog.append(tabs, search, grid);
     if (typeof refreshSources === 'function') {
       const refreshRow = document.createElement('div');
-      refreshRow.style.cssText = 'display:flex;align-items:center;gap:12px;flex-shrink:0;margin-top:16px';
+      refreshRow.className = 'cv-share-refresh';
       const refresh = document.createElement('button');
       refresh.type = 'button'; refresh.textContent = '목록 새로고침';
-      refresh.style.cssText = 'padding:8px 12px;border-radius:6px;background:var(--button-secondary-background,#4e5058);flex-shrink:0';
       const status = document.createElement('span');
       status.setAttribute('role', 'status');
-      status.style.cssText = 'font-size:12px;color:var(--text-muted,#b5bac1)';
       status.textContent = '찾는 게임이 없다면 실행 후 새로고침해 주세요.';
       refresh.onclick = async () => {
         if (refresh.disabled || settled) return;
@@ -32774,7 +32795,7 @@ function selectDesktopSource(sources, signal, options, refreshSources) {
     if (options) {
       const footer = document.createElement("div");
       footer.className = "cv-share-footer";
-      footer.textContent = "\uC0AC\uC6A9\uC790 \uC9C0\uC815";
+      const heading = document.createElement("h3"); heading.textContent = "방송 설정"; footer.append(heading);
       const detail = document.createElement("small");
       detail.textContent = "공유할 화질과 목표 FPS · 실제 FPS는 캡처 환경에 따라 달라집니다.";
       const quality = document.createElement("select");
@@ -32812,19 +32833,24 @@ function selectDesktopSource(sources, signal, options, refreshSources) {
       audio.onchange = () => {
         options.audio = audio.checked;
       };
-      audioLabel.append(audio, " 공유 대상 소리");
-      footer.append(detail, quality, fps, audioLabel);
+      audioLabel.className = "cv-share-audio";
+      const audioText = document.createElement("span"); audioLabel.append(audio, audioText);
+      const qualityLabel = document.createElement("label"), fpsLabel = document.createElement("label");
+      qualityLabel.append("화질", quality); fpsLabel.append("목표 FPS", fps);
+      footer.append(detail, qualityLabel, fpsLabel, audioLabel);
       const audioHelp = document.createElement("div");
       audioHelp.id = `${grid.id}-audio-help`;
       audio.setAttribute("aria-describedby", audioHelp.id);
-      for (const description of shareAudioDescriptions) {
-        const line = document.createElement("small");
-        line.textContent = description;
-        audioHelp.append(line);
-      }
+      const scopeHelp = document.createElement("small"); audioHelp.append(scopeHelp);
+      const offHelp = document.createElement("small"); offHelp.textContent = "끄면 방송 소리를 보내지 않습니다. 마이크 음소거는 별도입니다."; audioHelp.append(offHelp);
       footer.append(audioHelp);
       const captureHelp = document.createElement("small");
-      captureHelp.textContent = "앱 공유는 창 제목·테두리를 제외합니다. 활성화된 전체 화면·보더리스 창은 해당 모니터 영상으로 자동 전환하며 알림·오버레이가 포함될 수 있습니다. 소리는 선택한 앱만 공유합니다.";
+      updateSourceHelp = (type) => {
+        audioText.textContent = type === "window" ? "앱 소리 공유" : "시스템 소리 공유";
+        audio.setAttribute("aria-label", audioText.textContent);
+        scopeHelp.textContent = type === "window" ? "선택한 앱과 자식 프로세스의 소리만 전달합니다. 같은 프로세스의 다른 창·탭 소리도 포함될 수 있습니다." : "다른 앱의 소리와 알림을 포함한 시스템 소리를 전달합니다.";
+        captureHelp.textContent = type === "window" ? "게임 공유를 시작한 뒤 게임을 한 번 활성화해 주세요. 캡처 방식에 따라 알림·오버레이가 포함될 수 있습니다." : "선택한 모니터에 표시되는 화면 전체를 공유합니다.";
+      };
       footer.append(captureHelp);
       dialog.append(footer);
     }
@@ -55042,7 +55068,74 @@ var customVoiceDiscordCss = `
 .cv-viewers-list p{margin:8px 0 0;line-height:18px}
 .cv-screen:has(.cv-viewers[open])>.cv-screen-heading{opacity:1!important;visibility:visible!important;pointer-events:auto}
 .cv .cv-audio-state{font-size:12px;line-height:18px;color:var(--text-muted,#949ba4)}
-@media(prefers-reduced-motion:reduce){.cv *{scroll-behavior:auto}}
+.cv{color:var(--text-default,var(--text-normal,#dbdee1))}
+.cv :is(button,input,select,textarea,summary):focus-visible{outline:2px solid var(--focus-primary,var(--brand-500,#5865f2));outline-offset:2px}
+.cv [hidden]{display:none!important}
+.cv :is(input,select,textarea){min-width:0}
+.cv p{overflow-wrap:anywhere}
+.cv-channel-list .cv-channel-name,.cv-category-toggle{letter-spacing:normal;line-height:20px}
+.cv-channel-row:not(:has(.cv-channel-delete:not(:disabled))) .cv-channel{padding-right:8px!important}
+.cv-participants .cv-participant-target{border-radius:4px}
+.cv-participants .cv-participant{min-width:0}
+.cv button.cv-live{font-size:11px;line-height:16px;padding:0 4px;min-width:28px}
+.cv-preview-heading>strong{min-width:0;font-weight:600;line-height:20px}
+.cv-preview-heading>button{flex-shrink:0;width:28px;height:28px}
+.cv-broadcast-hover .cv-watch-button{min-height:36px;line-height:20px}
+.cv .cv-primary{background:var(--brand-500,#5865f2);color:#fff;font-weight:500}
+.cv .cv-primary:hover{background:var(--brand-560,#4752c4)}
+.cv-settings{padding:0 20px;max-width:760px;max-height:none;overflow:visible;font-size:14px;line-height:20px}
+.cv-settings-heading{display:flex;align-items:baseline;gap:12px;padding:20px 0 4px}
+.cv-settings-heading h2{margin:0;font:600 20px/28px var(--font-display,var(--font-primary,"gg sans",sans-serif));color:var(--header-primary,#f2f3f5)}
+.cv-settings-heading>span{font-size:12px;line-height:18px;color:var(--text-muted,#949ba4);font-variant-numeric:tabular-nums}
+.cv-settings-section{padding:20px 0;border-bottom:1px solid var(--border-subtle,var(--background-modifier-accent,#ffffff14));min-width:0}
+.cv-settings-section h3,.cv-native-update h3{font-size:16px;font-weight:600;line-height:24px;color:var(--header-primary,#f2f3f5);margin:0 0 8px}
+.cv-settings p{font-size:13px;line-height:20px;color:var(--text-secondary,var(--text-muted,#949ba4));margin:8px 0 12px;max-width:72ch}
+.cv-settings p:empty{display:none}
+.cv-settings .cv-setting{display:grid;grid-template-columns:minmax(0,1fr);align-items:center;gap:8px;margin:16px 0;font-size:14px;line-height:20px}
+.cv-settings .cv-setting>span{min-width:0;overflow-wrap:anywhere;font-weight:500}
+.cv-settings .cv-setting-toggle{grid-template-columns:minmax(0,1fr) 40px;gap:16px;min-height:36px}
+.cv-settings .cv-setting-slider{grid-template-columns:minmax(0,1fr) auto}
+.cv-settings .cv-setting-slider>input{grid-row:2;grid-column:1/-1;width:100%;margin:0}
+.cv-settings .cv-setting-slider>output{grid-column:2;grid-row:1;color:var(--text-muted,#949ba4);font-size:13px;font-variant-numeric:tabular-nums}
+.cv-settings :is(input:not([type=checkbox]):not([type=range]),select){width:100%;min-height:40px;padding:8px 12px;border-radius:4px;font-size:14px;line-height:20px}
+.cv-settings select{color-scheme:inherit}
+.cv-settings button{min-height:36px;padding:8px 12px;font-size:14px;line-height:20px;margin:4px 8px 4px 0}
+.cv-settings input[type=checkbox]{width:20px;height:20px}
+.cv-settings .cv-setting-toggle>input{appearance:none;-webkit-appearance:none;position:relative;width:40px;height:24px;margin:0;border:0;border-radius:12px;background:var(--background-accent,#72767d);cursor:pointer;transition:background-color 120ms}
+.cv-settings .cv-setting-toggle>input::before{content:"";position:absolute;top:4px;left:4px;width:16px;height:16px;border-radius:50%;background:#fff;transition:transform 120ms}
+.cv-settings .cv-setting-toggle>input:checked{background:var(--status-positive,#23a55a)}
+.cv-settings .cv-setting-toggle>input:checked::before{transform:translateX(16px)}
+.cv-settings .cv-setting-toggle>input:disabled{cursor:not-allowed}
+.cv-settings-actions{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
+.cv-settings-actions>button{margin:0}
+.cv-settings-advanced{margin:12px 0;padding:12px 0;border-block:1px solid var(--border-subtle,var(--background-modifier-accent,#ffffff14))}
+.cv-settings-advanced>summary{cursor:pointer;color:var(--text-secondary,var(--text-muted,#949ba4));font-weight:500;line-height:24px}
+.cv-settings-save{position:sticky;bottom:0;display:flex;align-items:center;gap:16px;padding:12px 0;margin-top:8px;background:var(--background-primary,#313338);border-top:1px solid var(--border-subtle,var(--background-modifier-accent,#ffffff14));z-index:2}
+.cv-settings-feedback{flex:1;min-width:0}
+.cv-settings .cv-settings-save p{margin:0;font-size:13px;line-height:20px;max-width:none}
+.cv-settings .cv-settings-status{color:var(--status-positive,#23a55a)}
+.cv-settings .cv-error{color:var(--text-danger,#fa777c);padding:0}
+.cv-settings-save>button{flex-shrink:0;margin:0;min-width:100px}
+.cv-settings-dialog{background:var(--background-primary,#313338);color-scheme:inherit}
+.cv-settings-dialog>header{padding:16px 20px;min-height:56px}
+.cv-settings-dialog>header button{display:grid;place-items:center;min-width:32px;min-height:32px}
+.cv-settings-dialog .cv-settings{max-height:calc(100dvh - 112px);overflow:auto;scrollbar-width:thin;overscroll-behavior:contain}
+.cv-native-update{margin-top:16px}
+.cv-native-update h3{font-size:14px;line-height:20px}
+.cv-native-update [role=status]{overflow-wrap:anywhere}
+.cv-quality-dialog{font-size:14px;line-height:20px}
+.cv-quality-dialog label{gap:12px;min-width:0}
+.cv-quality-dialog select{min-height:36px;max-width:65%;font:inherit}
+.cv-stream-heading-actions{flex-wrap:wrap;justify-content:flex-end;max-width:70%;gap:6px}
+.cv-stream-resolution{line-height:18px}
+.cv-viewers-list{line-height:20px}
+.cv-viewers-list li{min-height:32px}
+.cv-screen-toolbar button{min-height:32px;padding:6px 10px}
+.cv-user-profile .cv-user-mute{gap:12px;line-height:20px}
+.cv-user-profile .cv-user-mute input{flex:none}
+@media(max-width:480px){.cv-settings{padding:0 12px}.cv-settings-dialog>header{padding:12px}.cv-settings-save{gap:8px}.cv-settings-save>button{min-width:84px}.cv-stream-heading-actions{max-width:75%;gap:4px}.cv-viewers summary{padding:4px 6px}}
+@media(prefers-reduced-motion:reduce){.cv *{scroll-behavior:auto;transition:none!important;animation:none!important}}
+@media(forced-colors:active){.cv-settings .cv-setting-toggle>input{appearance:auto;-webkit-appearance:checkbox}.cv-settings .cv-setting-toggle>input::before{display:none}}
 `;
 
 // </CustomVoiceFeatures>
@@ -56727,7 +56820,8 @@ function createServerSetup(manager, compat) {
     input2.value = value;
     input2.autocomplete = "off";
     if (type === "text") input2.maxLength = 100;
-    wrapper.append(label, input2);
+    wrapper.className = "cv-setting";
+    const caption = document.createElement("span"); caption.textContent = label; wrapper.append(caption, input2);
     parent.append(wrapper);
     return input2;
   };
@@ -56821,7 +56915,7 @@ function createServerSetup(manager, compat) {
 }
 
 // package.json
-var version3 = "1.1.17";
+var version3 = "1.1.18";
 
 // src/components/settings.ts
 function createSettingsPanel(manager, compat) {
@@ -56835,17 +56929,30 @@ function createSettingsPanel(manager, compat) {
   const actions = [];
   let busy = false, disposed = false, mounted = false;
   const draft = { ...manager.store.get().settings };
+  let area = fields;
+  const section = (title, description) => {
+    area = document.createElement("section"); area.className = "cv-settings-section";
+    const heading = document.createElement("h3"); heading.textContent = title;
+    area.append(heading); fields.append(area);
+    if (description) { const hint = document.createElement("p"); hint.className = "cv-hint"; hint.textContent = description; area.append(hint); }
+  };
   const paragraph = (text) => {
     const p = document.createElement("p");
     p.textContent = text;
-    fields.append(p);
+    area.append(p);
     return p;
   };
-  paragraph(`CustomVoice ${version3} \xB7 \uB3C5\uB9BD \uC74C\uC131 \uC11C\uBE44\uC2A4 \uC124\uC815`);
+  const heading = document.createElement("header"); heading.className = "cv-settings-heading";
+  const title = document.createElement("h2"); title.textContent = "CustomVoice";
+  const version = document.createElement("span"); version.textContent = version3;
+  heading.append(title, version); fields.append(heading);
+  section("계정과 연결", "Discord 계정으로 로그인하고 음성 채널에 참여하세요.");
   const label = (text, control) => {
     const l = document.createElement("label");
-    l.append(text, control);
-    fields.append(l);
+    l.className = "cv-setting" + (control.type === "checkbox" ? " cv-setting-toggle" : control.type === "range" ? " cv-setting-slider" : "");
+    const caption = document.createElement("span"); caption.textContent = text;
+    l.append(caption, control);
+    area.append(l);
   };
   const bind = (key, control) => {
     controls.set(key, control);
@@ -56913,13 +57020,13 @@ function createSettingsPanel(manager, compat) {
     b.textContent = text;
     b.addEventListener("click", () => void action(fn, success2));
     actions.push(b);
-    fields.append(b);
+    area.append(b);
     return b;
   };
   paragraph(
-    "\uAE30\uBCF8 \uC11C\uBC84\uAC00 \uC124\uC815\uB418\uC5B4 \uC788\uC2B5\uB2C8\uB2E4. \uC8FC\uC18C \uC785\uB825 \uC5C6\uC774 Discord OAuth2 \uB85C\uADF8\uC778\uC744 \uC2DC\uC791\uD558\uC138\uC694."
+    "기본 서버가 준비되어 있습니다. Discord 계정으로 로그인하세요."
   );
-  const backend = input2("backendUrl", "Backend URL");
+  const backend = input2("backendUrl", "서버 주소");
   backend.placeholder = DEFAULT_BACKEND_URL;
   const ws = input2(
     "websocketUrl",
@@ -56959,12 +57066,13 @@ function createSettingsPanel(manager, compat) {
     "\uB85C\uADF8\uC778\uC740 \uC774 PC\uC5D0 \uC800\uC7A5\uB418\uC5B4 \uC7AC\uC2DC\uC791 \uD6C4 \uC790\uB3D9 \uBCF5\uC6D0\uB429\uB2C8\uB2E4. \uB85C\uADF8\uC544\uC6C3\uD558\uBA74 \uC800\uC7A5\uB41C \uC138\uC158\uB3C4 \uC0AD\uC81C\uB429\uB2C8\uB2E4."
   );
   const authStatus = paragraph("");
+  authStatus.className = "cv-settings-status"; authStatus.setAttribute("role", "status");
   paragraph(
     "\uCC44\uB110\uC740 \uC624\uB514\uC624 \uC7A5\uCE58 \uC5C6\uC774\uB3C4 \uC785\uC7A5\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4. \uC785\uC7A5 \uD6C4 \uB9C8\uC774\uD06C \uCF1C\uAE30\uB85C \uC1A1\uC2E0\uC744 \uC2DC\uC791\uD558\uBA70, \uC7A5\uCE58\uAC00 \uC5C6\uC5B4\uB3C4 \uB2E4\uB978 \uAE30\uB2A5\uC740 \uACC4\uC18D \uC0AC\uC6A9\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4."
   );
   const deviceStatus = paragraph("");
   deviceStatus.className = "cv-hint";
-  const login = button("Discord OAuth2 \uB85C\uADF8\uC778 \uC2DC\uC791", async () => {
+  const login = button("Discord로 로그인", async () => {
     await manager.updateSettings(snapshot());
     const url2 = await manager.login();
     if (disposed) return;
@@ -56984,7 +57092,7 @@ function createSettingsPanel(manager, compat) {
   });
   const codeArea = document.createElement("div");
   codeArea.hidden = true;
-  fields.append(codeArea);
+  area.append(codeArea);
   const link = document.createElement("a");
   link.textContent = "Discord \uC778\uC99D \uD654\uBA74 \uC5F4\uAE30";
   link.target = "_blank";
@@ -57009,6 +57117,7 @@ function createSettingsPanel(manager, compat) {
   code.addEventListener("input", () => {
     exchange.disabled = busy || !code.value;
   });
+  section("음성", "사용할 마이크와 출력 장치, 입력 방식을 설정하세요.");
   const mic = select("inputDevice", "\uB9C8\uC774\uD06C", [
     [draft.inputDevice, "\uC2DC\uC2A4\uD15C \uAE30\uBCF8"]
   ]);
@@ -57020,7 +57129,7 @@ function createSettingsPanel(manager, compat) {
     ["automatic", "\uC790\uB3D9 \uC74C\uC131 \uAC10\uC9C0"],
     ["ptt", "Push-to-Talk"]
   ]);
-  const sensitivity = input2("sensitivity", "\uC785\uB825 \uAC10\uB3C4 (RMS \uC784\uACC4\uAC12)", "range");
+  const sensitivity = input2("sensitivity", "마이크 입력 감도", "range");
   sensitivity.min = "0";
   sensitivity.max = "1";
   sensitivity.step = "0.005";
@@ -57041,6 +57150,7 @@ function createSettingsPanel(manager, compat) {
     ptt.value = e2.code;
     status.textContent = "";
   });
+  section("화면 공유", "공유할 화면과 소리의 기본값입니다.");
   select("shareQuality", "\uD654\uBA74 \uACF5\uC720 \uD488\uC9C8", [
     ["720p", "720p"],
     ["1080p", "1080p"],
@@ -57054,12 +57164,14 @@ function createSettingsPanel(manager, compat) {
   );
   input2("shareAudio", "공유 대상 소리", "checkbox");
   for (const description of shareAudioDescriptions) paragraph(description).className = "cv-hint";
+  section("연결과 알림");
   input2("autoReconnect", "\uC790\uB3D9 \uC7AC\uC5F0\uACB0", "checkbox");
   input2("shareBorder", "화면 공유 노란 테두리 표시 (다음 방송)", "checkbox");
   input2("soundEffects", "접속·음소거·방송 효과음", "checkbox");
   paragraph("입장·퇴장·음소거·방송 효과음은 Discord의 기본 효과음과 출력 볼륨을 사용합니다.").className = "cv-hint";
   input2("notifications", "\uC624\uB958 \uC54C\uB9BC", "checkbox");
   input2("debug", "\uB514\uBC84\uADF8 \uB85C\uADF8 (\uD1A0\uD070 \uC81C\uC678)", "checkbox");
+  section("업데이트", "GitHub의 새 버전을 자동으로 확인합니다.");
   const error62 = paragraph("");
   error62.className = "cv-error";
   error62.setAttribute("role", "alert");
@@ -57068,13 +57180,25 @@ function createSettingsPanel(manager, compat) {
   paragraph(`현재 플러그인: ${version3}. 공개 GitHub(awizc/CustomVoice-plugin)에서 자동 업데이트합니다. 별도 계정이나 토큰 설정은 필요하지 않습니다.`);
   button("플러그인 업데이트 확인", () => manager.checkPluginUpdate?.());
   const nativeUpdates = createNativeUpdatePanel();
-  fields.append(nativeUpdates.element);
-  button(
-    "\uC124\uC815 \uC800\uC7A5 \uBC0F \uC801\uC6A9",
+  area.append(nativeUpdates.element);
+  const save = button(
+    "설정 저장",
     () => manager.updateSettings(snapshot()),
     "\uC124\uC815\uC744 \uC800\uC7A5\uD558\uACE0 \uC801\uC6A9\uD588\uC2B5\uB2C8\uB2E4."
   );
-  fields.append(serverSetup.element);
+  serverSetup.element.classList.add("cv-settings-section"); fields.append(serverSetup.element);
+  const saveBar = document.createElement("footer"); saveBar.className = "cv-settings-save";
+  const feedback = document.createElement("div"); feedback.className = "cv-settings-feedback";
+  status.className = "cv-settings-status"; status.setAttribute("aria-live", "polite");
+  feedback.append(error62, status); save.className = "cv-primary"; saveBar.append(feedback, save); fields.append(saveBar);
+  const authActions = document.createElement("div"); authActions.className = "cv-settings-actions";
+  login.before(authActions); authActions.append(login, restoreLogin, logout, cancel); login.classList.add("cv-primary");
+  const serverDetails = document.createElement("details"); serverDetails.className = "cv-settings-advanced";
+  const serverSummary = document.createElement("summary"); serverSummary.textContent = "서버 주소 변경"; serverDetails.append(serverSummary);
+  const backendRow = backend.closest("label"), wsRow = ws.closest("label"), serverHint = wsRow.nextElementSibling;
+  backendRow.before(serverDetails); serverDetails.append(backendRow, wsRow, serverHint, restoreServer);
+  serverDetails.open = Boolean(draft.backendUrl && draft.backendUrl !== DEFAULT_BACKEND_URL || draft.websocketUrl);
+
   let lastDevices;
   function sync() {
     serverSetup.sync();
@@ -57801,14 +57925,13 @@ var ScreenHUD = class {
         host.className = "cv-fps-hud";
         host.setAttribute("aria-label", "CustomVoice 송출 모니터");
         host.innerHTML = `<style>
-.cv-fps-hud{position:fixed;inset:0;z-index:2147483647;box-sizing:border-box;background:#1e1f22;color:#f2f3f5;font:12px/1.3 "Segoe UI","Malgun Gothic",sans-serif;padding:0 12px 9px;font-variant-numeric:tabular-nums;overflow:hidden}
-.cv-fps-hud header{height:30px;display:flex;align-items:center;justify-content:space-between;color:#b5bac1;-webkit-app-region:drag}
-.cv-fps-hud button{width:30px;height:28px;border:0;background:transparent;color:#f2f3f5;font:20px "Segoe UI";cursor:pointer;-webkit-app-region:no-drag}
-.cv-fps-hud button:hover{background:#4e5058}.cv-fps-hud button:focus-visible{outline:2px solid #949cf7;outline-offset:-2px}
-.cv-fps-hud .cv-fps-values{display:flex;align-items:baseline;gap:18px;height:44px}
-.cv-fps-hud strong{font-size:30px;font-weight:600}.cv-fps-hud b{font-size:19px;font-weight:500}
-.cv-fps-hud small{color:#b5bac1;font-size:11px;margin-left:4px}
-.cv-fps-hud p{margin:3px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#b5bac1}
+ .cv-fps-hud{position:fixed;inset:0;z-index:2147483647;box-sizing:border-box;background:var(--background-secondary,#2b2d31);color:var(--header-primary,#f2f3f5);font:400 12px/18px var(--font-primary,"gg sans","Noto Sans",sans-serif);padding:0 12px 9px;font-variant-numeric:tabular-nums;overflow:hidden}
+.cv-fps-hud *{box-sizing:border-box}.cv-fps-hud header{height:32px;display:flex;align-items:center;justify-content:space-between;gap:8px;color:var(--text-muted,#949ba4);-webkit-app-region:drag}
+.cv-fps-hud button{display:grid;place-items:center;flex:none;width:28px;height:28px;padding:0;border:0;border-radius:4px;background:transparent;color:inherit;font:20px/1 var(--font-primary,"gg sans",sans-serif);cursor:pointer;-webkit-app-region:no-drag}
+.cv-fps-hud button:hover{background:var(--background-modifier-hover,#ffffff0a);color:var(--header-primary,#f2f3f5)}.cv-fps-hud button:focus-visible{outline:2px solid var(--brand-500,#5865f2);outline-offset:-2px}
+.cv-fps-hud .cv-fps-values{display:grid;grid-template-columns:1fr 1fr;align-items:baseline;gap:12px;min-height:44px}
+.cv-fps-hud .cv-fps-values>span{display:flex;align-items:baseline;gap:6px;min-width:0;white-space:nowrap}.cv-fps-hud strong{font-size:30px;line-height:40px;font-weight:600}.cv-fps-hud b{font-size:22px;line-height:32px;font-weight:500}
+.cv-fps-hud small{color:var(--text-muted,#949ba4);font-size:11px;line-height:16px}.cv-fps-hud p{margin:3px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text-muted,#949ba4)}
 </style><header><span>CustomVoice 송출 모니터</span><button type="button" aria-label="FPS 표시창 닫기" title="닫기 · 방송 설정 옆 FPS 버튼으로 다시 열기">×</button></header><div class="cv-fps-values"><span><strong data-cv="send">—</strong><small>송출 FPS</small></span><span><b data-cv="capture">—</b><small>캡처 FPS</small></span></div><p data-cv="encoder">인코더 확인 중</p><p data-cv="detail">프레임 측정 중</p>`;
         host.querySelector("button").onclick = () => this.close();
         doc.body.append(host); doc.title = "CustomVoice 송출 모니터";
@@ -59467,13 +59590,13 @@ function updateCallActive(state,room) {
 
 function createNativeUpdatePanel() {
   const element=document.createElement('section');element.className='cv-native-update';
-  const heading=document.createElement('h3');heading.textContent='업데이트';
+  const heading=document.createElement('h3');heading.textContent='캡처 구성요소';
   const description=document.createElement('p');
   description.textContent='공개 GitHub에서 플러그인은 시작 후와 5분마다, native는 시작 후와 15분마다 자동으로 확인하고 다운로드합니다. 플러그인은 통화·방송 종료 후 30초 이내에, native는 Discord 완전 종료 후 적용합니다. 연결 실패 시 자동 재시도합니다.';
   const version=document.createElement('p');version.textContent=`현재 native: ${globalThis.CustomVoiceNative?.version??'연결 없음'}`;
   const status=document.createElement('p');status.setAttribute('role','status');status.setAttribute('aria-live','polite');
-  const check=document.createElement('button');check.type='button';check.textContent='native 새 버전 확인';
-  const install=document.createElement('button');install.type='button';install.textContent='native 업데이트';install.disabled=true;
+  const check=document.createElement('button');check.type='button';check.textContent='새 버전 확인';
+  const install=document.createElement('button');install.type='button';install.textContent='구성요소 업데이트';install.disabled=true;
   element.append(heading,description,version,status,check,install);
   let disposed=false,busy=false,info,pending,timer,revision=0;
   const inProgress=()=>['downloading','waiting','applying'].includes(pending?.state);
@@ -59483,7 +59606,7 @@ function createNativeUpdatePanel() {
     const loaded=globalThis.CustomVoiceNative?.version,installed=info?.installedVersion??loaded;
     version.textContent=`설치된 native: ${installed??'연결 없음'}${info?.latestVersion?' / 배포된 native: '+info.latestVersion:''}${loaded&&installed&&newerVersion(installed,loaded)?' (완전 재시작 필요)':''}`;
     check.disabled=busy;install.disabled=busy||!info?.available||inProgress();
-    install.textContent=pending?.state==='waiting'?'Discord 종료 후 적용 예정':'native 업데이트';
+    install.textContent=pending?.state==='waiting'?'Discord 종료 후 적용 예정':'구성요소 업데이트';
   }
   function showState(value){
     pending=value;if(disposed)return;

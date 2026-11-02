@@ -111,13 +111,13 @@ class Element {
   remove(){if(this.parent)this.parent.children=this.parent.children.filter(node=>node!==this);}
   focus(){}
 }
-function pickerHarness(sources,refresh){
+function pickerHarness(sources,refresh,options){
   const body=new Element('body'), document={body,createElement:tag=>new Element(tag),createElementNS:(_ns,tag)=>new Element(tag)};
   const plugin=fs.readFileSync(path.join(root,'CustomVoice.plugin.js'),'utf8');
   const picker=plugin.slice(plugin.indexOf('function selectDesktopSource('),plugin.indexOf('function discordScreenCapture('));
-  const context=vm.createContext({document,nextPickerId:0,imageData:()=>undefined,cancelled:()=>new DOMException('Cancelled','AbortError')});
+  const context=vm.createContext({document,nextPickerId:0,imageData:()=>undefined,shareFrameRates:[30,60,165],shareQualities:['1080p'],shareQualityLabel:value=>value,cancelled:()=>new DOMException('Cancelled','AbortError')});
   vm.runInContext(picker,context);
-  const controller=new AbortController(), result=context.selectDesktopSource(sources,controller.signal,undefined,refresh);
+  const controller=new AbortController(), result=context.selectDesktopSource(sources,controller.signal,options,refresh);
   const all=()=>{const found=[];function visit(node){if(typeof node!=='object')return;found.push(node);for(const child of node.children)visit(child);}visit(body);return found;};
   return {body,result,controller,all,refresh:()=>all().find(node=>node.textContent==='목록 새로고침')};
 }
@@ -139,4 +139,28 @@ test('closing the picker during refresh cannot recreate a closed dialog',async()
   const rejection=assert.rejects(h.result,{name:'AbortError'}), pending=h.refresh().onclick();
   h.controller.abort(); await rejection;
   finish([{id:'window:42:0',name:'osu!'}]);await pending;assert.equal(h.body.children.length,0);
+});
+
+test('source search filters names without changing source IDs and can recover from an empty match',async()=>{
+  const h=pickerHarness([{id:'window:8:0',name:'Editor'},{id:'window:42:0',name:'osu!'}]);
+  const search=h.all().find(node=>node.className==='cv-share-search');
+  search.value=' OSU ';search.oninput();
+  assert.deepEqual(h.all().filter(node=>node.dataset.sourceId).map(node=>node.dataset.sourceId),['window:42:0']);
+  search.value='없는 창';search.oninput();assert.equal(h.all().filter(node=>node.dataset.sourceId).length,0);
+  assert.ok(h.all().some(node=>node.textContent?.includes('검색어를 바꾸거나')));
+  search.value='';search.oninput();assert.equal(h.all().filter(node=>node.dataset.sourceId).length,2);
+  h.all().find(node=>node.dataset.sourceId==='window:42:0').onclick();assert.equal(await h.result,'window:42:0');
+});
+
+test('app and screen tabs describe the actual audio scope and close cancels without sharing',async()=>{
+  const options={quality:'1080p',resolution:{frameRate:60},audio:false};
+  const h=pickerHarness([{id:'window:8:0',name:'Game'},{id:'screen:0:0',name:'Monitor'}],undefined,options);
+  const audio=h.all().find(node=>node.type==='checkbox');
+  assert.equal(audio.attributes['aria-label'],'앱 소리 공유');
+  h.all().find(node=>node.dataset.type==='screen').onclick();assert.equal(audio.attributes['aria-label'],'시스템 소리 공유');
+  assert.ok(h.all().some(node=>node.textContent?.includes('시스템 소리를 전달')));
+  audio.checked=true;audio.onchange();assert.equal(options.audio,true);
+  h.all().find(node=>node.dataset.type==='window').onclick();assert.equal(audio.attributes['aria-label'],'앱 소리 공유');assert.equal(options.audio,true);
+  const rejection=assert.rejects(h.result,{name:'AbortError'});h.all().find(node=>node.className==='cv-share-close').onclick();await rejection;
+  assert.equal(h.body.children.length,0);
 });
