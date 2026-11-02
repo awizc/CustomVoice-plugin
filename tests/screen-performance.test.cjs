@@ -57,6 +57,7 @@ test('high FPS profiles have finite budgets, preserve old profiles and survive s
       const p = api.screenProfile(quality, fps, { width: 3840, height: 2160 });
       assert.ok(Number.isFinite(p.bitrate) && p.bitrate > 0);
       assert.equal(p.publish.screenShareEncoding.maxFramerate, fps);
+      assert.equal(p.publish.degradationPreference, fps >= 60 ? 'maintain-framerate' : 'maintain-resolution');
       assert.equal(p.publish.simulcast, false);
     }
   }
@@ -110,8 +111,8 @@ test('sender profile stays in sync with the SDK and releases its lock on failure
   await api.configureScreenSender(track, profile);
   assert.equal(locked, false);
   assert.equal(params.encodings[0].maxFramerate, 144);
-  assert.equal(params.degradationPreference, 'maintain-resolution');
-  assert.equal(track.degradationPreference, 'maintain-resolution');
+  assert.equal(params.degradationPreference, 'maintain-framerate');
+  assert.equal(track.degradationPreference, 'maintain-framerate');
   assert.equal(params.encodings[0].scaleResolutionDownBy, 1);
   assert.equal(track.encodings[0].maxFramerate, 144);
   assert.equal(track.publishOptions.screenShareEncoding.maxFramerate, 144);
@@ -122,6 +123,49 @@ test('sender profile stays in sync with the SDK and releases its lock on failure
   await assert.rejects(api.configureScreenSender(track, api.screenProfile('1080p', 165)));
   assert.equal(locked, false);
   assert.equal(track.encodings[0].maxFramerate, 144);
+});
+
+test('sender settings cannot leak across a replacement while waiting for the SDK lock',async()=>{
+  let release,unlocked=false,writes=0;
+  const capture={readyState:'live'},sender={getParameters:()=>({encodings:[{}]}),setParameters:async()=>{writes++;}};
+  const track={sender,mediaStreamTrack:capture,senderLock:{lock:()=>new Promise(resolve=>{release=()=>resolve(()=>{unlocked=true;});})}};
+  const api=load(qualityCode,{DOMException});
+  const pending=api.configureScreenSender(track,api.screenProfile('1080p',165));
+  const rejected=assert.rejects(pending,{name:'AbortError'});
+  track.sender={...sender};release();await rejected;
+  assert.equal(unlocked,true);assert.equal(writes,0);assert.equal(track.publishOptions,undefined);
+});
+
+test('a changed sender during setParameters cannot commit old profile metadata',async()=>{
+  let finish,unlocked=false;
+  const params={encodings:[{}]},sender={getParameters:()=>params,setParameters:p=>new Promise(resolve=>{finish=resolve;})};
+  const track={sender,mediaStreamTrack:{readyState:'live'},senderLock:{lock:async()=>()=>{unlocked=true;}},publishOptions:{videoCodec:'h264'}};
+  const api=load(qualityCode,{DOMException});
+  const pending=api.configureScreenSender(track,api.screenProfile('1080p',165));
+  const rejected=assert.rejects(pending,{name:'AbortError'});await new Promise(setImmediate);
+  track.sender={...sender};finish();await rejected;
+  assert.equal(unlocked,true);assert.equal(track.publishOptions.degradationPreference,undefined);
+});
+
+test('failed quality changes restore policy only while the original sender still owns the track',async()=>{
+  for(const replace of [false,true]){
+    let rollback=0,unlocked=0;
+    const oldParams={degradationPreference:'maintain-resolution',encodings:[{maxFramerate:30,maxBitrate:4000000,scaleResolutionDownBy:1}]};
+    const capture={readyState:'live',getConstraints:()=>({frameRate:30}),applyConstraints:async()=>{rollback++;}};
+    const sender={getParameters:()=>structuredClone(oldParams),setParameters:async()=>{rollback++;}};
+    const track={kind:'video',mediaStreamTrack:capture,sender,degradationPreference:'maintain-resolution',publishOptions:{old:true},encodings:structuredClone(oldParams.encodings),senderLock:{lock:async()=>()=>{unlocked++;}}};
+    const api=load('var Client = class {'+section('  async updateScreenShare(quality, fps) {','  async releaseMedia() {')+'};',{
+      DOMException,Track:{Source:{ScreenShare:'screen'},Kind:{Video:'video'}},
+      fixScreenCapture:async()=>({fps:165}),
+      configureScreenSender:async()=>{track.degradationPreference='maintain-framerate';track.publishOptions={new:true};if(replace)track.sender={...sender};throw Error('configuration failed');}
+    });
+    const client=new api.Client();client.room={localParticipant:{getTrackPublication:()=>({track})}};
+    await assert.rejects(client.updateScreenShare('1080p',165),/configuration failed/);
+    assert.equal(rollback,replace?0:2);
+    assert.equal(unlocked,replace?0:1);
+    assert.equal(track.degradationPreference,replace?'maintain-framerate':'maintain-resolution');
+    assert.equal(track.publishOptions.old,replace?undefined:true);
+  }
 });
 
 test('screen snapshots and layout listeners ignore unrelated voice activity', () => {
@@ -282,6 +326,28 @@ test('FPS and processing time come from counter deltas, including resets and idl
   const measured = api.readScreenStats(captureReport, { ...second.sample, source: { id: 'source', frames: 300, timestamp: 3000 } }, true);
   assert.equal(measured.captureFps, 150);
   assert.equal(measured.fps, 120);
+});
+
+test('network and encoder telemetry use deltas and reject reset counters',()=>{
+  const api=load(playbackCode);
+  const report=(timestamp,frames,bytes,packets,sendDelay,cpu,bandwidth)=>new Map([['out',{id:'out',type:'outbound-rtp',kind:'video',timestamp,framesEncoded:frames,framesSent:frames,bytesSent:bytes,packetsSent:packets,totalPacketSendDelay:sendDelay,qualityLimitationDurations:{cpu,bandwidth},frameWidth:1920,frameHeight:1080,targetBitrate:18000000,qualityLimitationResolutionChanges:2}]]);
+  const first=api.readScreenStats(report(1000,100,1000000,100,5,10,1),undefined,true);
+  const next=api.readScreenStats(report(3000,300,3000000,200,15,11,1.6),first.sample,true);
+  assert.equal(next.sendBitrate,8000000);assert.equal(next.packetSendDelayMs,100);
+  assert.equal(next.cpuFraction,.5);assert.ok(Math.abs(next.bandwidthFraction-.3)<1e-6);
+  assert.equal(next.networkLimited,true);assert.equal(next.width,1920);assert.equal(next.height,1080);
+  assert.equal(next.resolutionChanges,2);
+  const reset=api.readScreenStats(report(4000,301,0,0,0,0,0),next.sample,true);
+  assert.equal(reset.sendBitrate,undefined);assert.equal(reset.packetSendDelayMs,undefined);assert.equal(reset.cpuFraction,undefined);assert.equal(reset.networkLimited,false);
+});
+
+test('a stats response from a replaced sender cannot adjust the new broadcast',async()=>{
+  let finish,next;
+  const api=load(playbackCode,{setTimeout:fn=>{next=fn;return 1;},clearTimeout(){}});
+  const track={sender:{getStats:()=>new Promise(resolve=>{finish=resolve;})}};
+  let updates=0;const off=api.watchScreenStats(track,true,{hidden:false},()=>updates++);
+  track.sender={getStats:async()=>new Map()};finish(new Map());await new Promise(setImmediate);
+  assert.equal(updates,0);assert.equal(typeof next,'function');off();
 });
 
 test('stats polling never overlaps and a pending result is ignored after cleanup', async () => {

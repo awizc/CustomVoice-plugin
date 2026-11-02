@@ -1,7 +1,7 @@
 /**
  * @name CustomVoice
  * @author CustomVoice contributors
- * @version 1.1.20
+ * @version 1.1.21
  * @nativeVersion 1.1.14
  * @description Independent LiveKit voice channels inside Discord.
  * @source https://github.com/awizc/CustomVoice-plugin
@@ -32110,8 +32110,10 @@ function customVoiceLog(level, ...args) {
 }
 
 // src/services/screen-quality.ts
-// Preserve resolution and the selected FPS ceiling while allowing temporal adaptation.
-var fixedDegradationPreference = "maintain-resolution";
+// High-motion sharing lets WebRTC shed pixel work before restricting FPS.
+// The selected capture size remains the ceiling and recovers with headroom.
+function screenDegradationPreference(fps) { return fps >= 60 ? "maintain-framerate" : "maintain-resolution"; }
+var screenAdaptationDescription = "60 FPS 이상은 움직임 우선: 과부하 시 송출 해상도를 일시 조절합니다. 15·30 FPS는 선명도를 우선합니다.";
 var shareFrameRates = [15, 30, 60, 90, 120, 144, 165];
 var shareQualities = ["720p", "1080p", "1440p", "source"];
 var shareQualityLabel = (quality) => quality === "source" ? "\uCD9C\uCC98 (\uC6D0\uBCF8 \uD654\uC9C8)" : quality;
@@ -32127,7 +32129,7 @@ function screenProfile(quality, fps, source) {
     simulcast: false,
     backupCodec: false,
     screenShareEncoding: { maxFramerate: fps, maxBitrate: bitrate },
-    degradationPreference: fixedDegradationPreference
+    degradationPreference: screenDegradationPreference(fps)
   };
   return { width, height, fps, bitrate, publish };
 }
@@ -32182,34 +32184,39 @@ function reportScreenCaptureLimit(profile) {
   }
 }
 async function fixScreenSender(sender, fps, bitrate) {
+  const preference = screenDegradationPreference(fps);
   for (let attempt = 0; ; attempt++) {
     const params = sender.getParameters();
     if (params.encodings.length !== 1) throw new Error("\uB2E8\uC77C \uD654\uC9C8 \uC778\uCF54\uB354\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4. \uD654\uBA74 \uACF5\uC720\uB97C \uC885\uB8CC\uD55C \uD6C4 \uB2E4\uC2DC \uC2DC\uC791\uD574 \uC8FC\uC138\uC694.");
-    if (params.degradationPreference === fixedDegradationPreference && params.encodings[0].scaleResolutionDownBy === 1 && params.encodings[0].maxFramerate === fps && params.encodings[0].maxBitrate === bitrate) return;
-    params.degradationPreference = fixedDegradationPreference;
+    if (params.degradationPreference === preference && params.encodings[0].scaleResolutionDownBy === 1 && params.encodings[0].maxFramerate === fps && params.encodings[0].maxBitrate === bitrate) return;
+    params.degradationPreference = preference;
     Object.assign(params.encodings[0], { scaleResolutionDownBy: 1, maxFramerate: fps, maxBitrate: bitrate });
     try {
       await sender.setParameters(params);
       break;
     } catch (error62) {
       if (!attempt && error62.name === "InvalidModificationError") continue;
-      throw new Error("\uACE0\uC815 \uD654\uC9C8/FPS \uC1A1\uCD9C \uC124\uC815\uC744 \uC801\uC6A9\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. Discord\uB97C \uC5C5\uB370\uC774\uD2B8\uD55C \uD6C4 \uB2E4\uC2DC \uC2DC\uB3C4\uD574 \uC8FC\uC138\uC694.", { cause: error62 });
+      throw new Error("화면 공유 인코더 설정을 적용하지 못했습니다. Discord를 업데이트한 뒤 다시 시도해 주세요.", { cause: error62 });
     }
   }
   const applied = sender.getParameters();
   const encoding = applied.encodings[0];
-  if (applied.degradationPreference !== fixedDegradationPreference || applied.encodings.length !== 1 || encoding?.scaleResolutionDownBy !== 1 || encoding.maxFramerate !== fps || encoding.maxBitrate !== bitrate) {
-    throw new Error("\uACE0\uC815 \uD654\uC9C8/FPS \uC778\uCF54\uB354 \uC124\uC815\uC744 \uD655\uC778\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uC790\uB3D9 \uD558\uD5A5 \uC124\uC815\uC73C\uB85C \uB300\uCCB4\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.");
+  if (applied.degradationPreference !== preference || applied.encodings.length !== 1 || encoding?.scaleResolutionDownBy !== 1 || encoding.maxFramerate !== fps || encoding.maxBitrate !== bitrate) {
+    throw new Error("선택한 화질/FPS 한도와 과부하 처리 설정을 인코더가 적용하지 못했습니다.");
   }
 }
 async function configureScreenSender(track, profile) {
   // Share the SDK's lock so subscription/encoding updates cannot invalidate
   // getParameters transactions or restore an older FPS after a profile change.
+  const sender = track.sender, capture = track.mediaStreamTrack;
+  const current = () => track.sender === sender && track.mediaStreamTrack === capture && capture?.readyState !== "ended";
   const unlock = await track.senderLock?.lock();
   try {
-    await fixScreenSender(track.sender, profile.fps, profile.bitrate);
+    if (!current()) throw new DOMException("방송 송신자가 변경되었습니다.", "AbortError");
+    await fixScreenSender(sender, profile.fps, profile.bitrate);
+    if (!current()) throw new DOMException("방송 송신자가 변경되었습니다.", "AbortError");
     track.publishOptions = { ...track.publishOptions, ...profile.publish };
-    track.degradationPreference = fixedDegradationPreference;
+    track.degradationPreference = screenDegradationPreference(profile.fps);
     if (track.encodings?.length === 1)
       Object.assign(track.encodings[0], { scaleResolutionDownBy: 1, maxFramerate: profile.fps, maxBitrate: profile.bitrate });
   } finally {
@@ -32227,14 +32234,25 @@ function createNativeCaptureModule() {
   const sessions = new Set();
   // Preserve the requested profile, regulating work offered to a busy encoder.
   function createCadenceController(target) {
-    let rate = target, overloaded = 0, healthy = 0, previousTime, warmup = 0;
+    let rate = target, overloaded = 0, healthy = 0, previousTime, previousId, warmup = 0;
+    let elapsed = 0, stableMs = 0, nextProbeAt = 0, probeBackoff = 15000, probe;
+    function clearFeedback() { overloaded = healthy = stableMs = 0; probe = undefined; }
+    function failProbe() {
+      rate = probe.from; clearFeedback();
+      nextProbeAt = elapsed + probeBackoff;
+      probeBackoff = Math.min(60000, probeBackoff * 2);
+    }
     return {
       get fps() { return rate; },
-      reset(next) { target = rate = next; overloaded = healthy = warmup = 0; previousTime = undefined; },
-      recover() { rate = target; overloaded = healthy = 0; warmup = 2; },
+      get diagnostics() { return { cadenceState: probe ? 'probing' : elapsed < nextProbeAt ? 'cooldown' : rate < target ? 'limited' : 'target', probeWaitMs: Math.max(0, nextProbeAt - elapsed) }; },
+      reset(next) { target = rate = next; clearFeedback(); warmup = elapsed = nextProbeAt = 0; probeBackoff = 15000; previousTime = previousId = undefined; },
+      recover() { rate = target; clearFeedback(); nextProbeAt = elapsed; probeBackoff = 15000; warmup = 2; },
       update(stats, native = {}) {
         const timestamp = stats?.sample?.timestamp;
         let intervalMs = stats?.intervalMs;
+        if (stats?.sample?.id !== undefined && previousId !== stats.sample.id) {
+          previousId = stats.sample.id; previousTime = undefined; clearFeedback();
+        }
         if (Number.isFinite(timestamp)) {
           if (previousTime !== undefined && timestamp <= previousTime) return rate;
           if (!(Number.isFinite(intervalMs) && intervalMs > 0) && previousTime !== undefined) intervalMs = timestamp - previousTime;
@@ -32243,37 +32261,54 @@ function createNativeCaptureModule() {
         const sent = stats?.encodeFps, cost = stats?.processingMs;
         // Missing game frames and the low-rate placeholder are source waits,
         // not encoder overload. Discard feedback spanning a capture restart.
-        if (native.sourceAvailable === false) { rate = target; overloaded = healthy = 0; warmup = 2; return rate; }
+        if (native.sourceAvailable === false) { rate = target; clearFeedback(); warmup = 2; return rate; }
         if (!Number.isFinite(sent) || sent < 0) return rate;
+        if (intervalMs > 6000) { clearFeedback(); warmup = 1; return rate; }
+        intervalMs = Number.isFinite(intervalMs) && intervalMs > 0 ? intervalMs : 1000;
+        elapsed += intervalMs;
         if (warmup > 0) { warmup--; return rate; }
         // Counter deltas contain whole frames. Allow one frame per sampling
         // interval so a fractional low pace is not mistaken for lost throughput.
-        const rounding = 1000 / (Number.isFinite(intervalMs) && intervalMs > 0 ? intervalMs : 1000);
+        const rounding = 1000 / intervalMs;
         const offered = Math.min(rate, Number.isFinite(stats.captureFps) ? Math.max(stats.captureFps, rate * 0.5) : rate);
         const busy = native.backpressureFps > rate * 0.1 || native.preImportDropFps > rate * 0.1;
+        const networkLimited = stats.networkLimited === true || stats.limitation === 'bandwidth';
         const stalled = sent === 0 && stats.captureFps > 1;
-        const slowEncoder = (sent === 0 || sent + rounding < offered * 0.82) && (stalled || busy || stats.limitation === 'cpu' || Number.isFinite(cost) && cost > 1000 / offered);
+        const slowEncoder = (sent === 0 || sent + rounding < offered * 0.82) && (busy || !networkLimited && (stalled || stats.limitation === 'cpu' || Number.isFinite(cost) && cost > 1000 / offered));
         const slowCapture = native.outputOverrunFps > rate * 0.15 && native.outputFps < rate * 0.85 && native.outputWorkMs > 1000 / rate;
         const slow = slowEncoder || slowCapture;
         overloaded = slow ? overloaded + 1 : 0;
-        // An absent WebRTC hardware flag is unknown, not proof of a serial CPU
-        // encoder. Parallel encode latency cannot define a throughput ceiling.
-        const software = stats.powerEfficientEncoder === false;
+        // powerEfficientEncoder is not a serial/parallel guarantee. Even software
+        // codecs can pipeline work, so measured throughput decides recovery.
         const captureReady = !Number.isFinite(native.outputWorkMs) || native.outputWorkMs < 750 / rate;
-        const encoderReady = !software || !Number.isFinite(cost) || cost < 750 / rate;
-        healthy = sent > 0 && !slow && !busy && captureReady && sent + rounding >= rate * 0.95 && encoderReady ? healthy + 1 : 0;
+        const ready = sent > 0 && !slow && !busy && !networkLimited && captureReady;
+        healthy = ready && sent + rounding >= rate * 0.95 ? healthy + 1 : 0;
+        stableMs = ready && sent + rounding >= rate * 0.82 ? stableMs + intervalMs : 0;
+        if (probe) {
+          probe.samples++;
+          // A failed increase returns to the last working pace. Longer retries
+          // prevent a permanent bottleneck from producing a sawtooth load spike.
+          const improved = ready && sent > probe.sent + Math.min(0.5, (rate - probe.from) * 0.25) && sent + rounding >= Math.min(rate * 0.95, probe.sent + (rate - probe.from) * 0.5);
+          probe.good = improved ? probe.good + 1 : 0;
+          if (networkLimited || overloaded >= 2 || probe.samples >= 3 && probe.good < 2) { failProbe(); return rate; }
+          if (probe.good >= 2) probe = undefined;
+          else return rate;
+        }
         if (overloaded >= 2) {
-          const encoderCapacity = !slowEncoder ? rate : sent === 0 ? rate * 0.5 : Math.min(sent * 1.1, software && Number.isFinite(cost) && cost > 0 ? 900 / cost : rate);
+          const encoderCapacity = !slowEncoder ? rate : sent === 0 ? rate * 0.5 : sent * 1.1;
           // Unlike parallel hardware encoding, this native worker is serial:
           // reserve some time when conversion/submission itself is the bottleneck.
           const capacity = Math.min(encoderCapacity, slowCapture ? 900 / native.outputWorkMs : rate);
           // A brief stall can skew one encode-time sample by hundreds of ms.
           // Bound each adjustment; ongoing overload still backs off every pair.
           rate = Math.max(1, rate * 0.5, Math.min(rate * 0.85, capacity));
-          overloaded = healthy = 0;
-        } else if (healthy >= 3 && rate < target) {
+          clearFeedback(); nextProbeAt = Math.max(nextProbeAt, elapsed + 3000);
+        } else if (rate < target && elapsed >= nextProbeAt && (healthy >= 3 || stableMs >= 10000)) {
+          probe = { from: rate, sent, samples: 0, good: 0 };
           rate = Math.min(target, rate + Math.max(2, rate * 0.2));
-          healthy = 1;
+          healthy = 1; stableMs = 0;
+        } else if (rate === target && healthy >= 30) {
+          probeBackoff = 15000;
         }
         return rate;
       }
@@ -32405,7 +32440,7 @@ function createNativeCaptureModule() {
       track, get backend() { return info?.backend === 'GAME-HOOK-D3D11' ? '게임 캡처 · GPU' : info?.backend === 'GAME-HOOK-MEMORY' ? '게임 캡처 · 호환 모드' : info?.backend === 'DXGI-D3D11' ? 'DXGI-D3D11 GPU (전체 화면)' : 'WGC-D3D11 GPU'; }, get metadata() { return info; },
       get diagnostics() {
         const time = now();
-        return { ...diagnostics, sourceAvailable: info?.sourceAvailable, holdingFrame: info?.holdingFrame, skippedRepeats, replacedFrames, preImportDropped, boundedDelivery, pacingFps: cadence.fps, nativePacing: nativePacing(), encoderPressured: cadence.fps < (info?.fps ?? fps) - 0.5,
+        return { ...diagnostics, ...cadence.diagnostics, sourceAvailable: info?.sourceAvailable, holdingFrame: info?.holdingFrame, skippedRepeats, replacedFrames, preImportDropped, boundedDelivery, pacingFps: cadence.fps, nativePacing: nativePacing(), encoderPressured: cadence.fps < (info?.fps ?? fps) - 0.5,
           ...handoffWindow.snapshot(time), handoffAgeMs: !closed && Number.isFinite(lastDelivered) ? Math.max(0, time - lastDelivered) : undefined,
           writerPendingMs: !closed && writing ? Math.max(0, time - lastWriteStarted) : 0,
           nativeSampleAgeMs: Number.isFinite(nativeSampleAt) ? Math.max(0, time - nativeSampleAt) : undefined };
@@ -32807,7 +32842,7 @@ function selectDesktopSource(sources, signal, options, refreshSources) {
       footer.className = "cv-share-footer";
       const heading = document.createElement("h3"); heading.textContent = "방송 설정"; footer.append(heading);
       const detail = document.createElement("small");
-      detail.textContent = "공유할 화질과 목표 FPS · 실제 FPS는 캡처 환경에 따라 달라집니다.";
+      detail.textContent = screenAdaptationDescription;
       const quality = document.createElement("select");
       quality.setAttribute("aria-label", "\uC1A1\uCD9C \uD654\uC9C8");
       for (const value of shareQualities) {
@@ -53882,22 +53917,26 @@ var VoiceClient = class {
     const sender = track.sender;
     const oldParams = sender.getParameters();
     const oldPublishOptions = track.publishOptions;
+    const oldDegradationPreference = track.degradationPreference;
     const oldEncodings = track.encodings?.map((encoding) => ({ ...encoding }));
+    const currentShare = () => this.room === room && capture.readyState !== "ended" && track.sender === sender && track.mediaStreamTrack === capture;
     try {
       const profile = await fixScreenCapture(capture, quality, fps);
-      if (this.room !== room || capture.readyState === "ended") throw new DOMException("\uBC29\uC1A1\uC774 \uC885\uB8CC\uB418\uC5C8\uC2B5\uB2C8\uB2E4.", "AbortError");
+      if (!currentShare()) throw new DOMException("방송 송신자가 변경되었습니다.", "AbortError");
       await configureScreenSender(track, profile);
-      if (this.room !== room || track.mediaStreamTrack.readyState === "ended") throw new DOMException("\uBC29\uC1A1\uC774 \uC885\uB8CC\uB418\uC5C8\uC2B5\uB2C8\uB2E4.", "AbortError");
+      if (!currentShare()) throw new DOMException("방송 송신자가 변경되었습니다.", "AbortError");
       publication.options = { ...publication.options, ...profile.publish };
       this.activeShare = { ...this.activeShare, quality, fps };
       reportScreenCaptureLimit(profile);
     } catch (error62) {
-      if (this.room === room && capture.readyState !== "ended") {
+      if (currentShare()) {
         const unlock = await track.senderLock?.lock();
         try {
+          if (!currentShare()) throw error62;
           if (nativeScreenCaptures.has(capture) && this.activeShare)
             await fixScreenCapture(capture, this.activeShare.quality, this.activeShare.fps).catch(() => {});
           else await capture.applyConstraints(oldConstraints).catch(() => {});
+          if (!currentShare()) throw error62;
           const rollback = sender.getParameters();
           rollback.degradationPreference = oldParams.degradationPreference;
           rollback.encodings.forEach((encoding, index) => {
@@ -53907,8 +53946,11 @@ var VoiceClient = class {
           });
           await sender.setParameters(rollback).catch(() => {
           });
-          track.publishOptions = oldPublishOptions;
-          if (oldEncodings) track.encodings = oldEncodings;
+          if (currentShare()) {
+            track.publishOptions = oldPublishOptions;
+            track.degradationPreference = oldDegradationPreference;
+            if (oldEncodings) track.encodings = oldEncodings;
+          }
         } finally {
           unlock?.();
         }
@@ -56925,7 +56967,7 @@ function createServerSetup(manager, compat) {
 }
 
 // package.json
-var version3 = "1.1.20";
+var version3 = "1.1.21";
 
 // src/components/settings.ts
 function createSettingsPanel(manager, compat) {
@@ -57172,6 +57214,7 @@ function createSettingsPanel(manager, compat) {
     "화면 공유 목표 FPS",
     shareFrameRates.map((n) => [String(n), String(n)])
   );
+  paragraph(screenAdaptationDescription).className = "cv-hint";
   input2("shareAudio", "공유 대상 소리", "checkbox");
   for (const description of shareAudioDescriptions) paragraph(description).className = "cv-hint";
   section("연결과 알림");
@@ -57861,7 +57904,7 @@ var screenHUDs = /* @__PURE__ */ new WeakMap();
 var screenHUDSerial = 0;
 function screenEncoderLabel(stats) {
   if (stats?.powerEfficientEncoder === true) return "GPU";
-  if (stats?.powerEfficientEncoder === false || /openh264|libvpx|libaom|svt-av1/i.test(stats?.encoder ?? "")) return "CPU";
+  if (/openh264|libvpx|libaom|svt-av1/i.test(stats?.encoder ?? "")) return "CPU";
   return stats?.encoder || "인코더 확인 중";
 }
 var ScreenHUD = class {
@@ -57953,12 +57996,13 @@ var ScreenHUD = class {
       const stats = this.stats;
       const value = (number) => Number.isFinite(number) ? String(Math.round(number)) : "—";
       const fields = {
-        send: value(stats?.fps), capture: value(stats?.captureFps),
+        send: value(stats?.fps), capture: value(stats?.native?.outputFps ?? stats?.captureFps),
         encoder: `${screenEncoderLabel(stats)} · ${stats?.codec ?? "—"} · ${Number.isFinite(stats?.processingMs) ? stats.processingMs.toFixed(1) : "—"} ms`,
-        detail: stats?.native?.sourceAvailable === false ? stats?.native?.holdingFrame ? "마지막 게임 화면 유지 중 · 새 화면 대기" : "게임 화면 대기 중 · 공유한 창으로 돌아가세요" : `목표 ${this.manager.store.get().settings.shareFps} · 새 화면 ${value(stats?.native?.sourceFps)} FPS${stats?.native?.encoderPressured ? ` · 처리 ${value(stats.native.pacingFps)}` : ""}`
+        detail: stats?.native?.sourceAvailable === false ? stats?.native?.holdingFrame ? "마지막 게임 화면 유지 중 · 새 화면 대기" : "게임 화면 대기 중 · 공유한 창으로 돌아가세요" : `목표 ${this.manager.store.get().settings.shareFps} · ${stats?.width && stats?.height ? `${stats.width}×${stats.height}` : "해상도 확인 중"}${stats?.networkLimited ? " · 네트워크 제한" : stats?.limitation === "cpu" ? " · 인코딩 부하" : ""}${stats?.native?.cadenceState === "probing" ? " · FPS 복구 중" : stats?.native?.encoderPressured ? ` · 처리 ${value(stats.native.pacingFps)}` : ""}`
       };
       for (const [key, text] of Object.entries(fields)) if (entry.nodes[key].textContent !== text) entry.nodes[key].textContent = text;
       entry.nodes.encoder.title = stats?.encoder ?? "실제 인코더 정보 대기 중";
+      entry.nodes.detail.title = fields.detail;
     } catch (error) {
       if (Date.now() > entry.deadline) { this.close(); customVoiceLog("warn", "[CustomVoice] FPS display failed", error); }
     }
@@ -58061,7 +58105,7 @@ function ShareQuality({ manager }) {
       onChange: (e2) => setFps(Number(e2.target.value))
     },
     shareFrameRates.map((v) => /* @__PURE__ */ import_react4.default.createElement("option", { key: v, value: v }, v, " FPS"))
-  )), error62 && /* @__PURE__ */ import_react4.default.createElement("p", { role: "alert" }, error62), /* @__PURE__ */ import_react4.default.createElement("footer", null, /* @__PURE__ */ import_react4.default.createElement("button", { type: "button", onClick: () => dialog.current?.close() }, "\uB2EB\uAE30"), /* @__PURE__ */ import_react4.default.createElement("button", { type: "submit", disabled: pending }, pending ? "\uC801\uC6A9 \uC911\u2026" : "\uC801\uC6A9")))));
+  )), /* @__PURE__ */ import_react4.default.createElement("p", { className: "cv-hint" }, screenAdaptationDescription), error62 && /* @__PURE__ */ import_react4.default.createElement("p", { role: "alert" }, error62), /* @__PURE__ */ import_react4.default.createElement("footer", null, /* @__PURE__ */ import_react4.default.createElement("button", { type: "button", onClick: () => dialog.current?.close() }, "\uB2EB\uAE30"), /* @__PURE__ */ import_react4.default.createElement("button", { type: "submit", disabled: pending }, pending ? "\uC801\uC6A9 \uC911\u2026" : "\uC801\uC6A9")))));
 }
 
 // src/components/screen-view.tsx
@@ -58114,17 +58158,29 @@ function readScreenStats(report, previous, local) {
     id: selected.id, timestamp: selected.timestamp, frames: selected[framesKey],
     bytes: local ? selected.bytesSent : selected.bytesReceived,
     sentFrames: local ? selected.framesSent : void 0,
+    packets: local ? selected.packetsSent : void 0,
+    sendDelay: local ? selected.totalPacketSendDelay : void 0,
+    limitations: local ? selected.qualityLimitationDurations : void 0,
     time: local ? selected.totalEncodeTime : selected.totalDecodeTime,
     source: source ? { id: source.id, timestamp: source.timestamp, frames: source.frames } : void 0
   };
   let fps = Number.isFinite(selected.framesPerSecond) ? selected.framesPerSecond : void 0;
-  let processingMs, intervalMs;
+  let processingMs, intervalMs, sendBitrate, packetSendDelayMs, cpuFraction, bandwidthFraction;
   if (previous?.id === sample.id && sample.timestamp > previous.timestamp && sample.frames >= previous.frames) {
     const frames = sample.frames - previous.frames;
     intervalMs = sample.timestamp - previous.timestamp;
     fps = frames * 1e3 / intervalMs;
     if (frames > 0 && Number.isFinite(sample.time) && Number.isFinite(previous.time) && sample.time >= previous.time)
       processingMs = (sample.time - previous.time) * 1e3 / frames;
+    const delta = (value, before) => Number.isFinite(value) && Number.isFinite(before) && value >= before ? value - before : void 0;
+    const bytes = delta(sample.bytes, previous.bytes), packets = delta(sample.packets, previous.packets), delay = delta(sample.sendDelay, previous.sendDelay);
+    if (bytes !== void 0) sendBitrate = bytes * 8000 / intervalMs;
+    if (packets > 0 && delay !== void 0) packetSendDelayMs = delay * 1000 / packets;
+    const limited = (reason) => {
+      const seconds = delta(sample.limitations?.[reason], previous.limitations?.[reason]);
+      return seconds === void 0 ? void 0 : Math.min(1, seconds * 1000 / intervalMs);
+    };
+    cpuFraction = limited("cpu"); bandwidthFraction = limited("bandwidth");
   }
   let captureFps = Number.isFinite(source?.framesPerSecond) ? source.framesPerSecond : void 0;
   const before = previous?.source;
@@ -58133,7 +58189,10 @@ function readScreenStats(report, previous, local) {
   const encodeFps = fps;
   if (local && previous?.id === sample.id && sample.timestamp > previous.timestamp && Number.isFinite(sample.sentFrames) && Number.isFinite(previous.sentFrames) && sample.sentFrames >= previous.sentFrames)
     fps = (sample.sentFrames - previous.sentFrames) * 1e3 / (sample.timestamp - previous.timestamp);
-  return { sample, intervalMs, fps, encodeFps, captureFps, processingMs, limitation: selected.qualityLimitationReason, encoder: local ? selected.encoderImplementation : void 0, powerEfficientEncoder: local ? selected.powerEfficientEncoder : void 0, codec: report.get?.(selected.codecId)?.mimeType?.split("/")[1], codecParameters: report.get?.(selected.codecId)?.sdpFmtpLine };
+  const networkLimited = local && (selected.qualityLimitationReason === "bandwidth" || bandwidthFraction > 0.2 || packetSendDelayMs > 150 && fps < encodeFps * 0.9);
+  return { sample, intervalMs, fps, encodeFps, captureFps, processingMs, sendBitrate, packetSendDelayMs, cpuFraction, bandwidthFraction, networkLimited,
+    width: selected.frameWidth, height: selected.frameHeight, targetBitrate: selected.targetBitrate, resolutionChanges: selected.qualityLimitationResolutionChanges,
+    limitation: selected.qualityLimitationReason, encoder: local ? selected.encoderImplementation : void 0, powerEfficientEncoder: local ? selected.powerEfficientEncoder : void 0, codec: report.get?.(selected.codecId)?.mimeType?.split("/")[1], codecParameters: report.get?.(selected.codecId)?.sdpFmtpLine };
 }
 var screenStatsWatchers = /* @__PURE__ */ new WeakMap();
 function watchScreenStats(track, local, doc, update, interval = 2000) {
@@ -58149,12 +58208,15 @@ function watchScreenStats(track, local, doc, update, interval = 2000) {
           watcher.previous = void 0;
           return;
         }
-        const report = await (local && track.sender?.getStats ? track.sender.getStats() : track.getRTCStatsReport?.());
+        const sender = track.sender;
+        const report = await (local && sender?.getStats ? sender.getStats() : track.getRTCStatsReport?.());
         if (watcher.disposed) return;
+        if (local && sender !== track.sender) { watcher.previous = void 0; return; }
         const stats = readScreenStats(report, watcher.previous, local);
         watcher.previous = stats?.sample;
         if (stats && local) {
           stats.captureLimit = track.mediaStreamTrack?.getSettings?.().frameRate;
+          stats.degradationPreference = track.degradationPreference;
           const native = nativeScreenCaptures.get(track.mediaStreamTrack);
           stats.backend = native?.backend;
           native?.updateEncoderStats?.(stats);
@@ -58165,7 +58227,8 @@ function watchScreenStats(track, local, doc, update, interval = 2000) {
           }
           if (stats.native && Number.isFinite(stats.fps) && (!watcher.lastLog || stats.sample.timestamp - watcher.lastLog >= 1e4)) {
             watcher.lastLog = stats.sample.timestamp;
-            customVoiceLog("info", "[CustomVoice] Screen performance", JSON.stringify({ target: stats.captureLimit, ...stats.native, captureFps: stats.captureFps, sendFps: stats.fps, encodeFps: stats.encodeFps, encodeMs: stats.processingMs, encoder: stats.encoder, powerEfficientEncoder: stats.powerEfficientEncoder, codec: stats.codec, codecParameters: stats.codecParameters, limitation: stats.limitation }));
+            customVoiceLog("info", "[CustomVoice] Screen performance", JSON.stringify({ target: stats.captureLimit, ...stats.native, captureFps: stats.captureFps, sendFps: stats.fps, encodeFps: stats.encodeFps, encodeMs: stats.processingMs, encoder: stats.encoder, powerEfficientEncoder: stats.powerEfficientEncoder, codec: stats.codec, codecParameters: stats.codecParameters, limitation: stats.limitation,
+              intervalMs: stats.intervalMs, degradationPreference: stats.degradationPreference, width: stats.width, height: stats.height, sendBitrate: stats.sendBitrate, targetBitrate: stats.targetBitrate, packetSendDelayMs: stats.packetSendDelayMs, cpuFraction: stats.cpuFraction, bandwidthFraction: stats.bandwidthFraction, networkLimited: stats.networkLimited, resolutionChanges: stats.resolutionChanges }));
           }
         }
         if (stats && !local && (!watcher.lastLog || stats.sample.timestamp - watcher.lastLog >= 10000)) {

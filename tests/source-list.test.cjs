@@ -116,7 +116,8 @@ function pickerHarness(sources,refresh,options){
   const plugin=fs.readFileSync(path.join(root,'CustomVoice.plugin.js'),'utf8');
   const picker=plugin.slice(plugin.indexOf('function selectDesktopSource('),plugin.indexOf('function discordScreenCapture('));
   const context=vm.createContext({document,nextPickerId:0,imageData:()=>undefined,shareFrameRates:[30,60,165],shareQualities:['1080p'],shareQualityLabel:value=>value,cancelled:()=>new DOMException('Cancelled','AbortError')});
-  vm.runInContext(picker,context);
+  const quality=plugin.slice(plugin.indexOf('// src/services/screen-quality.ts'),plugin.indexOf('// src/discord/screen-capture.ts'));
+  vm.runInContext(quality+picker,context);
   const controller=new AbortController(), result=context.selectDesktopSource(sources,controller.signal,options,refresh);
   const all=()=>{const found=[];function visit(node){if(typeof node!=='object')return;found.push(node);for(const child of node.children)visit(child);}visit(body);return found;};
   return {body,result,controller,all,refresh:()=>all().find(node=>node.textContent==='목록 새로고침')};
@@ -156,6 +157,7 @@ test('app and screen tabs describe the actual audio scope and close cancels with
   const options={quality:'1080p',resolution:{frameRate:60},audio:false};
   const h=pickerHarness([{id:'window:8:0',name:'Game'},{id:'screen:0:0',name:'Monitor'}],undefined,options);
   const audio=h.all().find(node=>node.type==='checkbox');
+  assert.ok(h.all().some(node=>node.textContent?.includes('송출 해상도를 일시 조절')));
   assert.equal(audio.attributes['aria-label'],'앱 소리 공유');
   h.all().find(node=>node.dataset.type==='screen').onclick();assert.equal(audio.attributes['aria-label'],'시스템 소리 공유');
   assert.ok(h.all().some(node=>node.textContent?.includes('시스템 소리를 전달')));

@@ -5,14 +5,25 @@
 const sessions = new Set();
 // Preserve the requested profile, regulating work offered to a busy encoder.
 function createCadenceController(target) {
-  let rate = target, overloaded = 0, healthy = 0, previousTime, warmup = 0;
+  let rate = target, overloaded = 0, healthy = 0, previousTime, previousId, warmup = 0;
+  let elapsed = 0, stableMs = 0, nextProbeAt = 0, probeBackoff = 15000, probe;
+  function clearFeedback() { overloaded = healthy = stableMs = 0; probe = undefined; }
+  function failProbe() {
+    rate = probe.from; clearFeedback();
+    nextProbeAt = elapsed + probeBackoff;
+    probeBackoff = Math.min(60000, probeBackoff * 2);
+  }
   return {
     get fps() { return rate; },
-    reset(next) { target = rate = next; overloaded = healthy = warmup = 0; previousTime = undefined; },
-    recover() { rate = target; overloaded = healthy = 0; warmup = 2; },
+    get diagnostics() { return { cadenceState: probe ? 'probing' : elapsed < nextProbeAt ? 'cooldown' : rate < target ? 'limited' : 'target', probeWaitMs: Math.max(0, nextProbeAt - elapsed) }; },
+    reset(next) { target = rate = next; clearFeedback(); warmup = elapsed = nextProbeAt = 0; probeBackoff = 15000; previousTime = previousId = undefined; },
+    recover() { rate = target; clearFeedback(); nextProbeAt = elapsed; probeBackoff = 15000; warmup = 2; },
     update(stats, native = {}) {
       const timestamp = stats?.sample?.timestamp;
       let intervalMs = stats?.intervalMs;
+      if (stats?.sample?.id !== undefined && previousId !== stats.sample.id) {
+        previousId = stats.sample.id; previousTime = undefined; clearFeedback();
+      }
       if (Number.isFinite(timestamp)) {
         if (previousTime !== undefined && timestamp <= previousTime) return rate;
         if (!(Number.isFinite(intervalMs) && intervalMs > 0) && previousTime !== undefined) intervalMs = timestamp - previousTime;
@@ -21,37 +32,54 @@ function createCadenceController(target) {
       const sent = stats?.encodeFps, cost = stats?.processingMs;
       // Missing game frames and the low-rate placeholder are source waits,
       // not encoder overload. Discard feedback spanning a capture restart.
-      if (native.sourceAvailable === false) { rate = target; overloaded = healthy = 0; warmup = 2; return rate; }
+      if (native.sourceAvailable === false) { rate = target; clearFeedback(); warmup = 2; return rate; }
       if (!Number.isFinite(sent) || sent < 0) return rate;
+      if (intervalMs > 6000) { clearFeedback(); warmup = 1; return rate; }
+      intervalMs = Number.isFinite(intervalMs) && intervalMs > 0 ? intervalMs : 1000;
+      elapsed += intervalMs;
       if (warmup > 0) { warmup--; return rate; }
       // Counter deltas contain whole frames. Allow one frame per sampling
       // interval so a fractional low pace is not mistaken for lost throughput.
-      const rounding = 1000 / (Number.isFinite(intervalMs) && intervalMs > 0 ? intervalMs : 1000);
+      const rounding = 1000 / intervalMs;
       const offered = Math.min(rate, Number.isFinite(stats.captureFps) ? Math.max(stats.captureFps, rate * 0.5) : rate);
       const busy = native.backpressureFps > rate * 0.1 || native.preImportDropFps > rate * 0.1;
+      const networkLimited = stats.networkLimited === true || stats.limitation === 'bandwidth';
       const stalled = sent === 0 && stats.captureFps > 1;
-      const slowEncoder = (sent === 0 || sent + rounding < offered * 0.82) && (stalled || busy || stats.limitation === 'cpu' || Number.isFinite(cost) && cost > 1000 / offered);
+      const slowEncoder = (sent === 0 || sent + rounding < offered * 0.82) && (busy || !networkLimited && (stalled || stats.limitation === 'cpu' || Number.isFinite(cost) && cost > 1000 / offered));
       const slowCapture = native.outputOverrunFps > rate * 0.15 && native.outputFps < rate * 0.85 && native.outputWorkMs > 1000 / rate;
       const slow = slowEncoder || slowCapture;
       overloaded = slow ? overloaded + 1 : 0;
-      // An absent WebRTC hardware flag is unknown, not proof of a serial CPU
-      // encoder. Parallel encode latency cannot define a throughput ceiling.
-      const software = stats.powerEfficientEncoder === false;
+      // powerEfficientEncoder is not a serial/parallel guarantee. Even software
+      // codecs can pipeline work, so measured throughput decides recovery.
       const captureReady = !Number.isFinite(native.outputWorkMs) || native.outputWorkMs < 750 / rate;
-      const encoderReady = !software || !Number.isFinite(cost) || cost < 750 / rate;
-      healthy = sent > 0 && !slow && !busy && captureReady && sent + rounding >= rate * 0.95 && encoderReady ? healthy + 1 : 0;
+      const ready = sent > 0 && !slow && !busy && !networkLimited && captureReady;
+      healthy = ready && sent + rounding >= rate * 0.95 ? healthy + 1 : 0;
+      stableMs = ready && sent + rounding >= rate * 0.82 ? stableMs + intervalMs : 0;
+      if (probe) {
+        probe.samples++;
+        // A failed increase returns to the last working pace. Longer retries
+        // prevent a permanent bottleneck from producing a sawtooth load spike.
+        const improved = ready && sent > probe.sent + Math.min(0.5, (rate - probe.from) * 0.25) && sent + rounding >= Math.min(rate * 0.95, probe.sent + (rate - probe.from) * 0.5);
+        probe.good = improved ? probe.good + 1 : 0;
+        if (networkLimited || overloaded >= 2 || probe.samples >= 3 && probe.good < 2) { failProbe(); return rate; }
+        if (probe.good >= 2) probe = undefined;
+        else return rate;
+      }
       if (overloaded >= 2) {
-        const encoderCapacity = !slowEncoder ? rate : sent === 0 ? rate * 0.5 : Math.min(sent * 1.1, software && Number.isFinite(cost) && cost > 0 ? 900 / cost : rate);
+        const encoderCapacity = !slowEncoder ? rate : sent === 0 ? rate * 0.5 : sent * 1.1;
         // Unlike parallel hardware encoding, this native worker is serial:
         // reserve some time when conversion/submission itself is the bottleneck.
         const capacity = Math.min(encoderCapacity, slowCapture ? 900 / native.outputWorkMs : rate);
         // A brief stall can skew one encode-time sample by hundreds of ms.
         // Bound each adjustment; ongoing overload still backs off every pair.
         rate = Math.max(1, rate * 0.5, Math.min(rate * 0.85, capacity));
-        overloaded = healthy = 0;
-      } else if (healthy >= 3 && rate < target) {
+        clearFeedback(); nextProbeAt = Math.max(nextProbeAt, elapsed + 3000);
+      } else if (rate < target && elapsed >= nextProbeAt && (healthy >= 3 || stableMs >= 10000)) {
+        probe = { from: rate, sent, samples: 0, good: 0 };
         rate = Math.min(target, rate + Math.max(2, rate * 0.2));
-        healthy = 1;
+        healthy = 1; stableMs = 0;
+      } else if (rate === target && healthy >= 30) {
+        probeBackoff = 15000;
       }
       return rate;
     }
@@ -183,7 +211,7 @@ async function start(sourceId, fps, quality, signal, showBorder = true) {
     track, get backend() { return info?.backend === 'GAME-HOOK-D3D11' ? '게임 캡처 · GPU' : info?.backend === 'GAME-HOOK-MEMORY' ? '게임 캡처 · 호환 모드' : info?.backend === 'DXGI-D3D11' ? 'DXGI-D3D11 GPU (전체 화면)' : 'WGC-D3D11 GPU'; }, get metadata() { return info; },
     get diagnostics() {
       const time = now();
-      return { ...diagnostics, sourceAvailable: info?.sourceAvailable, holdingFrame: info?.holdingFrame, skippedRepeats, replacedFrames, preImportDropped, boundedDelivery, pacingFps: cadence.fps, nativePacing: nativePacing(), encoderPressured: cadence.fps < (info?.fps ?? fps) - 0.5,
+      return { ...diagnostics, ...cadence.diagnostics, sourceAvailable: info?.sourceAvailable, holdingFrame: info?.holdingFrame, skippedRepeats, replacedFrames, preImportDropped, boundedDelivery, pacingFps: cadence.fps, nativePacing: nativePacing(), encoderPressured: cadence.fps < (info?.fps ?? fps) - 0.5,
         ...handoffWindow.snapshot(time), handoffAgeMs: !closed && Number.isFinite(lastDelivered) ? Math.max(0, time - lastDelivered) : undefined,
         writerPendingMs: !closed && writing ? Math.max(0, time - lastWriteStarted) : 0,
         nativeSampleAgeMs: Number.isFinite(nativeSampleAt) ? Math.max(0, time - nativeSampleAt) : undefined };

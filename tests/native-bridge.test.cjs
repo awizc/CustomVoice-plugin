@@ -239,6 +239,62 @@ test('fractional low FPS recovers through the native bridge with different polli
   }
 });
 
+test('a 100 FPS bottleneck uses bounded probes and returns to 165 after ten minutes of pressure',()=>{
+  const cadence=rendererHarness().api.createCadenceController(165);
+  let attempts=0,previous=165;
+  for(let second=1;second<=600;second++){
+    const sent=Math.min(100,cadence.fps);
+    cadence.update({sample:{id:'stream',timestamp:second*1000},intervalMs:1000,encodeFps:sent,captureFps:165,processingMs:12,limitation:'cpu'},
+      {sourceAvailable:true,outputFps:cadence.fps,outputWorkMs:.3});
+    if(cadence.fps>previous)attempts++;
+    previous=cadence.fps;
+    assert.ok(cadence.fps>=100 && cadence.fps<=165);
+  }
+  assert.ok(attempts>=5 && attempts<=15,`Expected spaced recovery attempts, got ${attempts}`);
+  for(let second=601;second<=680;second++){
+    cadence.update({sample:{id:'stream',timestamp:second*1000},intervalMs:1000,encodeFps:cadence.fps,captureFps:cadence.fps,processingMs:12,limitation:'none'},
+      {sourceAvailable:true,outputFps:cadence.fps,outputWorkMs:.3});
+  }
+  assert.equal(cadence.fps,165,'Real headroom must recover without restarting the stream');
+});
+
+test('energy efficiency is not evidence of serial encoding and cannot pin recovery',()=>{
+  const cadence=rendererHarness().api.createCadenceController(165);
+  for(let i=0;i<2;i++)cadence.update({encodeFps:50,captureFps:165,processingMs:30,limitation:'cpu'});
+  for(let i=0;i<30;i++)cadence.update({encodeFps:cadence.fps,captureFps:cadence.fps,processingMs:30,powerEfficientEncoder:false});
+  assert.equal(cadence.fps,165);
+});
+
+test('network pressure cannot start upward probes or be confused with an encoder stall',()=>{
+  const cadence=rendererHarness().api.createCadenceController(165);
+  for(let i=0;i<10;i++)cadence.update({encodeFps:0,captureFps:165,processingMs:80,limitation:'bandwidth'});
+  assert.equal(cadence.fps,165,'Let WebRTC congestion control handle network pressure');
+  for(let i=0;i<2;i++)cadence.update({encodeFps:100,captureFps:165,processingMs:12,limitation:'cpu'});
+  const reduced=cadence.fps;
+  for(let i=0;i<120;i++)cadence.update({encodeFps:reduced,captureFps:reduced,processingMs:1,networkLimited:true});
+  assert.equal(cadence.fps,reduced);
+});
+
+test('capture transitions and old stats gaps cannot accumulate into fresh overload',()=>{
+  const cadence=rendererHarness().api.createCadenceController(165);
+  const slow={sample:{id:'one',timestamp:1000},encodeFps:30,captureFps:165,limitation:'cpu'};
+  cadence.update(slow);
+  cadence.update({...slow,sample:{id:'one',timestamp:61000},intervalMs:60000});
+  assert.equal(cadence.fps,165);
+  cadence.update({...slow,sample:{id:'two',timestamp:1},intervalMs:1000});
+  assert.equal(cadence.fps,165);
+  let time=1000;
+  for(let i=0;i<100;i++){
+    const sample=()=>({id:'two',timestamp:time+=1000});
+    cadence.update({sample:sample(),encodeFps:0,captureFps:0},{sourceAvailable:false});
+    cadence.recover();
+    for(let n=0;n<2;n++)cadence.update({sample:sample(),encodeFps:0,captureFps:165},{sourceAvailable:true,backpressureFps:165});
+    cadence.update({sample:sample(),encodeFps:165,captureFps:165},{sourceAvailable:true});
+    assert.equal(cadence.fps,165);
+  }
+  assert.equal(cadence.fps,165);
+});
+
 test('mode and source recovery immediately restore native pace and state also arrives with frames',async()=>{
   const h=rendererHarness({nativePacing:true}),control=await h.start();
   const slow={encodeFps:30,captureFps:144,processingMs:25};
