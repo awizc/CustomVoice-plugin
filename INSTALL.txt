@@ -1,0 +1,14 @@
+CustomVoice 1.1.22 / native 1.1.15
+Windows 11 24H2 이상(x64), BetterDiscord 필요
+
+1. ZIP을 전부 풉니다.
+2. Discord를 트레이에서도 완전히 종료합니다.
+3. Install.cmd를 실행한 뒤 Discord를 다시 켭니다.
+
+Node.js, .NET, OBS를 별도로 설치할 필요는 없습니다.
+업데이트는 공개 GitHub에서 자동으로 받습니다.
+플러그인은 통화 종료 후, native는 Discord 완전 종료 후 적용됩니다.
+업데이트가 멈추면 최신 ZIP으로 다시 설치하세요. 기존 설정은 유지됩니다.
+
+시청자 집계 권한: SERVER-VIEWERS.md
+별도 NVENC 송출 서버 설정: SERVER-NATIVE-SCREEN.md
