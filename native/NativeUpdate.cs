@@ -6,7 +6,7 @@ using System.Text.RegularExpressions;
 
 internal static class NativeUpdate
 {
-    internal const string CurrentVersion = "1.1.13";
+    internal const string CurrentVersion = "1.1.14";
     static string Plugins => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "BetterDiscord", "plugins");
     static string Root => Path.Combine(Path.GetDirectoryName(Plugins)!, "data", "CustomVoice", "native-updates");
     static string StateFile => Path.Combine(Root, "status.json");
@@ -158,15 +158,22 @@ internal static class NativeUpdate
                 string payload = Path.Combine(unpacked, "CustomVoice.native"); Validate(payload, version);
                 _ = PackagePluginNewer(payload, Plugins, release.Meta.packageVersion);
                 File.WriteAllText(Path.Combine(job, "request.json"), JsonSerializer.Serialize(release.Meta));
-                var start = new ProcessStartInfo(Path.Combine(payload, "CustomVoice.Capture.exe")) { WorkingDirectory = payload, UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
-                start.ArgumentList.Add("--apply-native-update");
-                using var worker = Process.Start(start) ?? throw new IOException("native 업데이트 설치를 예약하지 못했습니다.");
-                worker.StandardInput.Close();
+                using var worker = StartDetachedWorker(Path.Combine(payload, "CustomVoice.Capture.exe"), payload, "--apply-native-update");
                 var pending = new State("waiting", version, worker.Id, worker.StartTime.ToUniversalTime().Ticks, "Discord를 트레이에서 완전히 종료하면 플러그인과 native를 적용합니다. 종료 후 5초 정도 기다렸다가 다시 실행해 주세요.");
                 Save(pending); Program.Send(pending);
             }
             catch (Exception error) { Save(new("failed", version, message: error.Message)); throw; }
         }
+    }
+    internal static Process StartDetachedWorker(string executable, string directory, string argument)
+    {
+        // A redirected CreateProcess worker can inherit the requesting helper's
+        // pipe handles on Windows, keeping Node's close/read-to-end pending for
+        // the entire Discord session. The installer communicates via status.json
+        // only; launch it hidden with no inherited request pipes.
+        var start = new ProcessStartInfo(executable) { WorkingDirectory = directory, UseShellExecute = true, WindowStyle = ProcessWindowStyle.Hidden, ErrorDialog = false };
+        start.ArgumentList.Add(argument);
+        return Process.Start(start) ?? throw new IOException("native 업데이트 설치를 예약하지 못했습니다.");
     }
     static void CleanupJobs()
     {

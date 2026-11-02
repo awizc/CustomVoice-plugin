@@ -85,6 +85,17 @@ test('native updater ignores stale checks after stop and works without a bridge'
   let finish;const h=harness({bridge:{checkNativeUpdate:()=>new Promise(resolve=>{finish=resolve;}),prepareNativeUpdate:()=>assert.fail('stopped')}});
   const operation=h.instance.nativeUpdater.check();h.instance.stop();finish({available:true});await operation;assert.equal(h.timers.size,0);
 });
+test('older native launcher pipe stalls still report the ready installation and ignore a late timeout',async()=>{
+  const h=harness();let fail;
+  const result=h.context.prepareNativeUpdateWithStatus({prepareNativeUpdate:()=>new Promise((_,reject)=>{fail=reject;}),nativeUpdateStatus:async()=>({state:'waiting',version:'1.1.14'})},'1.1.14');
+  await Promise.resolve();const timer=[...h.timers.values()].find(value=>value.delay===1000);await timer.fn();
+  assert.equal((await result).version,'1.1.14');fail(Error('old launcher timeout'));await Promise.resolve();h.instance.stop();
+});
+test('native preparation status polling stops after its owner is disposed',async()=>{
+  const h=harness();let active=true;
+  const result=h.context.prepareNativeUpdateWithStatus({prepareNativeUpdate:()=>new Promise(()=>{})},'1.1.14',()=>active);
+  active=false;await [...h.timers.values()].find(value=>value.delay===1000).fn();assert.equal(await result,undefined);h.instance.stop();
+});
 test('disk replacement backs up, rejects concurrent changes, and deletes only its retired credential',()=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'cv-updater-'));const plugins=path.join(root,'plugins'),data=path.join(root,'data','CustomVoice');fs.mkdirSync(plugins);fs.mkdirSync(data,{recursive:true});
   const file=path.join(plugins,'CustomVoice.plugin.js'),legacy=path.join(data,'github-token.bin'),unrelated=path.join(data,'settings.json');fs.writeFileSync(file,source('1.1.12'));fs.writeFileSync(legacy,'retired');fs.writeFileSync(unrelated,'keep');

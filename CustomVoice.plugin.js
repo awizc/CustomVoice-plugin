@@ -1,8 +1,8 @@
 /**
  * @name CustomVoice
  * @author CustomVoice contributors
- * @version 1.1.18
- * @nativeVersion 1.1.13
+ * @version 1.1.19
+ * @nativeVersion 1.1.14
  * @description Independent LiveKit voice channels inside Discord.
  * @source https://github.com/awizc/CustomVoice-plugin
  * @updateUrl https://raw.githubusercontent.com/awizc/CustomVoice-plugin/main/CustomVoice.plugin.js
@@ -56915,7 +56915,7 @@ function createServerSetup(manager, compat) {
 }
 
 // package.json
-var version3 = "1.1.18";
+var version3 = "1.1.19";
 
 // src/components/settings.ts
 function createSettingsPanel(manager, compat) {
@@ -57988,7 +57988,7 @@ function ShareQuality({ manager }) {
       ? "테두리 숨김이 허용되었습니다. 다른 캡처 앱이 사용 중이면 테두리가 남을 수 있습니다."
       : "");
   const bridge = globalThis.CustomVoiceNative;
-  const restartNotice = bridge && (newerVersion("1.1.13", bridge.version ?? "0.0.0") || captureControl && newerVersion("1.1.13", captureInfo?.hostVersion ?? "0.0.0"))
+  const restartNotice = bridge && (newerVersion("1.1.14", bridge.version ?? "0.0.0") || captureControl && newerVersion("1.1.14", captureInfo?.hostVersion ?? "0.0.0"))
     ? "이전 캡처 연결이 로드되어 있습니다. Discord를 완전히 종료한 뒤 다시 실행하면 최신 개선 사항이 적용됩니다."
     : "";
   const borderToggle = import_react4.default.createElement("label", {
@@ -59571,7 +59571,7 @@ var NativeAutoUpdater = class {
       if(!bridge?.checkNativeUpdate||!bridge?.prepareNativeUpdate)return;
       const info=await bridge.checkNativeUpdate();if(!current())return;
       let pending=info.pending;
-      if(!['downloading','waiting','applying'].includes(pending?.state)&&info.available)pending=await bridge.prepareNativeUpdate();
+      if(!['downloading','waiting','applying'].includes(pending?.state)&&info.available)pending=await prepareNativeUpdateWithStatus(bridge,info.latestVersion,current);
       if(!current())return;this.failures=0;
       if(pending?.state==='waiting'&&this.announcedVersion!==pending.version){
         this.announcedVersion=pending.version;
@@ -59583,6 +59583,26 @@ var NativeAutoUpdater = class {
     }finally{this.busy=false;if(current())this.schedule(delay);}
   }
 };
+
+function prepareNativeUpdateWithStatus(bridge,version,current=()=>true) {
+  // Older native launchers leave inherited response pipes open after preparing
+  // a worker. Its status file is authoritative even before that request closes.
+  return new Promise((resolve,reject)=>{
+    let settled=false,timer;const deadline=Date.now()+340000;
+    const finish=(error,value)=>{if(settled)return;settled=true;clearTimeout(timer);error?reject(error):resolve(value);};
+    const poll=async()=>{
+      if(settled)return;if(!current()){finish(null);return;}
+      if(Date.now()>deadline){finish(Error('업데이트 준비 시간이 초과되었습니다. 잠시 후 자동 재시도합니다.'));return;}
+      try{
+        const state=await bridge.nativeUpdateStatus?.();
+        if(state&&['waiting','applying'].includes(state.state)&&(!version||state.version===version)){finish(null,state);return;}
+      }catch{}
+      if(!settled)timer=setTimeout(()=>void poll(),1000);
+    };
+    timer=setTimeout(()=>void poll(),1000);
+    Promise.resolve().then(()=>bridge.prepareNativeUpdate()).then(value=>finish(null,value),error=>finish(error));
+  });
+}
 
 function updateCallActive(state,room) {
   return Boolean(state?.sharing || ['Connecting','Connected','Reconnecting','Disconnecting'].includes(state?.connection) || room?.state && room.state!=='disconnected');
@@ -59632,7 +59652,7 @@ function createNativeUpdatePanel() {
     try{
       const result=await bridge().checkNativeUpdate();if(disposed||request!==revision)return;info=result;
       status.textContent=result.available?`native ${result.latestVersion} 업데이트가 있습니다.`:'native는 최신 버전입니다.';
-      const required='1.1.13';
+      const required='1.1.14';
       if(newerVersion(required,result.installedVersion)&&newerVersion(required,result.latestVersion))status.textContent=`이 플러그인에 필요한 native ${required}가 정식 릴리스에 아직 없습니다. 전체 ZIP으로 업데이트해 주세요.`;
       if(result.pending&&['downloading','waiting','applying','failed'].includes(result.pending.state))showState(result.pending);
       else {pending=result.pending;clearTimeout(timer);}
@@ -59643,7 +59663,7 @@ function createNativeUpdatePanel() {
   install.addEventListener('click',async()=>{
     if(disposed||busy||!info?.available||inProgress())return;
     const request=++revision;clearTimeout(timer);busy=true;paint();status.textContent='native 배포 파일을 다운로드하고 있습니다…';
-    try{const value=await bridge().prepareNativeUpdate();if(!disposed&&request===revision)showState(value);}
+    try{const value=await prepareNativeUpdateWithStatus(bridge(),info.latestVersion,()=>!disposed&&request===revision);if(!disposed&&request===revision)showState(value);}
     catch(error){if(!disposed){status.textContent=error.message;pending=undefined;}}
     finally{busy=false;paint();}
   });

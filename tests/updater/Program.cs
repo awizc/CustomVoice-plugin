@@ -1,4 +1,5 @@
 using System.Net;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 
@@ -9,8 +10,31 @@ internal static class Program
     static void Reject(Action action) { try { action(); } catch (InvalidDataException) { return; } throw new Exception("Accepted invalid package"); }
     static async Task RejectAsync(Func<Task> action) { try { await action(); } catch (InvalidDataException) { return; } throw new Exception("Accepted invalid download"); }
     static string Plugin(string version) => $"/**\n * @name CustomVoice\n * @version {version}\n */\nmodule.exports = class {{}};";
-    static async Task Main()
+    static async Task Main(string[] args)
     {
+        if (args is ["--wait-fixture"]) { await Task.Delay(TimeSpan.FromMinutes(1)); return; }
+        if (args is ["--spawn-fixture"])
+        {
+            using var child = NativeUpdate.StartDetachedWorker(Environment.ProcessPath!, AppContext.BaseDirectory, "--wait-fixture");
+            Console.WriteLine(child.Id); return;
+        }
+        if (OperatingSystem.IsWindows())
+        {
+            var start = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
+            start.ArgumentList.Add("--spawn-fixture");
+            using var parent = Process.Start(start)!; parent.StandardInput.Close();
+            int childId = int.Parse((await parent.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10)))!);
+            using var child = Process.GetProcessById(childId);
+            try
+            {
+                await parent.StandardOutput.ReadToEndAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                await parent.StandardError.ReadToEndAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                await parent.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                Check(parent.ExitCode == 0 && !child.HasExited, "Detached worker must survive while request pipes close immediately");
+                Console.WriteLine("PASS: hidden detached worker does not hold requesting process pipes open");
+            }
+            finally { if (!child.HasExited) { child.Kill(); await child.WaitForExitAsync(); } }
+        }
         string repo = "https://github.com/awizc/CustomVoice-plugin/releases/";
         var url = new Uri(repo + "latest/download/CustomVoice-native.json");
         foreach (string invalid in new[] { "http://github.com/awizc/CustomVoice-plugin/releases/x", "https://evil.example/file", "https://github.com/other/repo/releases/x", "https://github.com:444/awizc/CustomVoice-plugin/releases/x", "https://user@github.com/awizc/CustomVoice-plugin/releases/x", "https://github.com.evil.example/x", "https://raw.githubusercontent.com/other/repo/main/x" })

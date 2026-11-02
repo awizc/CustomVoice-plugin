@@ -91,7 +91,7 @@ function install({ allowTest = false } = {}) {
             const message = JSON.parse(line);
             if (message.type === 'ready') {
               if (message.protocol !== 1 || message.intervalMs > 1.1) throw new Error('Unsupported native capture protocol.');
-              clearTimeout(timer); started = true; resolve({ ...message, session: id, hostVersion: '1.1.13', hostAdaptivePacing: true, hostBorderControl: true });
+              clearTimeout(timer); started = true; resolve({ ...message, session: id, hostVersion: '1.1.14', hostAdaptivePacing: true, hostBorderControl: true });
             } else if (message.type === 'frame') {
               if (active) notify('frame', message);
               else send({ type: 'release', slot: message.slot, sequence: message.sequence });
