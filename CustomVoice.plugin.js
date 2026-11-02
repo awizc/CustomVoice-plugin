@@ -1,7 +1,7 @@
 /**
  * @name CustomVoice
  * @author CustomVoice contributors
- * @version 1.1.2
+ * @version 1.1.3
  * @nativeVersion 1.1.1
  * @description Independent LiveKit voice channels inside Discord.
  * @source https://github.com/awizc/CustomVoice-plugin
@@ -56266,7 +56266,7 @@ function createServerSetup(manager, compat) {
 }
 
 // package.json
-var version3 = "1.1.2";
+var version3 = "1.1.3";
 
 // src/components/settings.ts
 function createSettingsPanel(manager, compat) {
@@ -58820,7 +58820,7 @@ var PluginUpdater = class {
     }finally{this.busy=false;}
   }
   diskFiles(){
-    const fs=require('fs'),path=require('path'),Buffer=require('buffer').Buffer,file=path.join(this.api.Plugins.folder,'CustomVoice.plugin.js');
+    const fs=require('fs'),path=require('path'),file=path.join(this.api.Plugins.folder,'CustomVoice.plugin.js');
     return {
       read:()=>fs.readFileSync(file,'utf8'),
       replace:(source,previous)=>{
@@ -58829,9 +58829,14 @@ var PluginUpdater = class {
         fs.mkdirSync(backup,{recursive:true});fs.writeFileSync(path.join(backup,'CustomVoice.plugin.js'),previous,'utf8');
         // In-place writes preserve the enabled state; renaming over the plugin
         // can make the file watcher treat it as a removal and disable it.
-        const fd=fs.openSync(file,'r+');
-        const write=code=>{const bytes=Buffer.from(code,'utf8');let offset=0;while(offset<bytes.length){const count=fs.writeSync(fd,bytes,offset,bytes.length-offset,offset);if(count===0)throw Error('Plugin write stalled');offset+=count;}fs.ftruncateSync(fd,bytes.length);fs.fsyncSync(fd);};
-        try{write(source);}catch(error){write(previous);throw error;}finally{fs.closeSync(fd);}
+        // BetterDiscord exposes a restricted fs facade without descriptor APIs.
+        // writeFileSync overwrites the existing file without a rename/removal.
+        try{fs.writeFileSync(file,source,'utf8');}
+        catch(error){
+          try{fs.writeFileSync(file,previous,'utf8');}
+          catch{throw Error(`업데이트 파일 복원에 실패했습니다. 백업: ${backup}`);}
+          throw error;
+        }
       }
     };
   }
