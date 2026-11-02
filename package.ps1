@@ -33,7 +33,7 @@ Copy-Item -LiteralPath (Join-Path $published 'licenses') -Destination $nativeTar
 [IO.File]::WriteAllText((Join-Path $nativeTarget 'native-version.json'), (ConvertTo-Json @{ version = $nativeVersion }), [Text.UTF8Encoding]::new($false))
 Copy-Item -LiteralPath $sourcePlugin -Destination $stage
 Copy-Item -LiteralPath (Join-Path $published 'Install.cmd') -Destination $stage
-[IO.File]::WriteAllText((Join-Path $stage 'INSTALL.txt'), "압축을 전부 풀고 Discord를 완전히 종료한 뒤 Install.cmd를 더블클릭하세요.`r`nNode.js와 .NET을 따로 설치할 필요가 없습니다.`r`n썸네일은 송출자와 시청자 모두 1.1.0 이상이 필요합니다. 업데이트 후 Discord를 완전히 재시작하세요.`r`nprivate 자동 업데이트에는 awizc/CustomVoice-plugin 저장소 접근 권한과 각자의 GitHub 토큰이 필요합니다. 공유받은 ZIP은 인증 없이 설치할 수 있습니다.`r`n", [Text.UTF8Encoding]::new($true))
+[IO.File]::WriteAllText((Join-Path $stage 'INSTALL.txt'), "압축을 전부 풀고 Discord를 완전히 종료한 뒤 Install.cmd를 더블클릭하세요.`r`nNode.js와 .NET을 따로 설치할 필요가 없습니다.`r`n썸네일은 송출자와 시청자 모두 1.1.0 이상이 필요합니다. 업데이트 후 Discord를 완전히 재시작하세요.`r`nnative 1.1.6부터 공개 저장소 자동 업데이트에는 GitHub 토큰이 필요하지 않습니다. 비공개 저장소는 각자의 접근 권한과 토큰이 필요합니다.`r`n이전 native에서 토큰 없이 사용했다면 이 전체 ZIP을 한 번 설치하세요.`r`n", [Text.UTF8Encoding]::new($true))
 $manifest = @(Get-ChildItem -LiteralPath $nativeTarget -Recurse -File | Sort-Object FullName | ForEach-Object {
     @{ name = $_.FullName.Substring($nativeTarget.Length + 1).Replace('\','/'); sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }
 })

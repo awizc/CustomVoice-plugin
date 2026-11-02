@@ -37,10 +37,11 @@ internal static class GithubUpdate
     }
     internal static HttpClient Client()
     {
-        if (!File.Exists(TokenFile)) throw new InvalidOperationException("업데이트 설정에서 private 저장소 읽기 권한이 있는 GitHub 토큰을 등록해 주세요.");
-        string token = Encoding.UTF8.GetString(Protect(File.ReadAllBytes(TokenFile), true));
+        // Public repositories work without credentials. A user-supplied token
+        // remains optional for private access and authenticated rate limits.
+        string? token = File.Exists(TokenFile) ? Encoding.UTF8.GetString(Protect(File.ReadAllBytes(TokenFile), true)) : null;
         var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(20), MaxResponseContentBufferSize = 8 * 1024 * 1024 };
-        http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        if (!string.IsNullOrWhiteSpace(token)) http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
         http.DefaultRequestHeaders.UserAgent.ParseAdd("CustomVoice-Updater/" + NativeUpdate.CurrentVersion);
         http.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");
         http.DefaultRequestHeaders.CacheControl = new CacheControlHeaderValue { NoCache = true };
@@ -68,7 +69,7 @@ internal static class GithubUpdate
     {
         if (response.IsSuccessStatusCode) return;
         string reason = (int)response.StatusCode switch {
-            401 => "GitHub 토큰이 만료되었거나 유효하지 않습니다. 토큰을 다시 등록해 주세요.",
+            401 => "GitHub 토큰이 만료되었거나 유효하지 않습니다. 다시 등록하거나, 공개 저장소라면 설정에서 토큰을 삭제해 주세요.",
             403 when response.Headers.Contains("Retry-After") || response.Headers.TryGetValues("X-RateLimit-Remaining", out var remaining) && remaining.Contains("0") => "GitHub 요청 한도에 도달했습니다. 잠시 후 다시 시도합니다.",
             403 => "저장소 읽기 권한 또는 조직의 토큰 승인을 확인해 주세요.",
             404 => "저장소·배포 파일이 없거나 private 저장소 읽기 권한이 없습니다.",

@@ -21,7 +21,7 @@ var PluginUpdater = class {
       if(this.candidate?.expires<=Date.now())this.candidate=null;
       if(this.active()){delay=30000;if(notify)this.toast('통화와 방송을 종료하면 30초 이내에 업데이트를 다시 확인합니다.');return;}
       const bridge=globalThis.CustomVoiceNative;
-      if(!bridge?.getUpdateSource)throw Error('private 저장소 업데이트에는 최신 native 설치와 Discord 완전 재시작이 필요합니다.');
+      if(!bridge?.getUpdateSource)throw Error('업데이트에는 최신 native 설치와 Discord 완전 재시작이 필요합니다.');
       const cached=this.candidate;this.candidate=null;
       const result=cached?.result??await bridge.getUpdateSource(this.commit);
       if(!current())return;
@@ -50,7 +50,7 @@ var PluginUpdater = class {
         this.candidate=null;this.commit='';
         delay=Math.min(900000,60000*2**Math.min(this.failures++,4));
         const message=error?.message??String(error);
-        if(this.lastError!==message||Date.now()-(this.lastErrorAt??0)>=900000){this.lastError=message;this.lastErrorAt=Date.now();try{customVoiceLog('warn','[CustomVoice] Private update',message);}catch{}}
+        if(this.lastError!==message||Date.now()-(this.lastErrorAt??0)>=900000){this.lastError=message;this.lastErrorAt=Date.now();try{customVoiceLog('warn','[CustomVoice] Plugin update',message);}catch{}}
         if(notify)this.toast(message,'error');
       }
     }finally{this.busy=false;if(current())this.schedule(delay);}
@@ -126,7 +126,7 @@ function createNativeUpdatePanel() {
     try{
       const result=await bridge().checkNativeUpdate();if(disposed||request!==revision)return;info=result;
       status.textContent=result.available?`native ${result.latestVersion} 업데이트가 있습니다.`:'native는 최신 버전입니다.';
-      const required='1.1.5';
+      const required='1.1.6';
       if(newerVersion(required,result.installedVersion)&&newerVersion(required,result.latestVersion))status.textContent=`이 플러그인에 필요한 native ${required}가 정식 릴리스에 아직 없습니다. 전체 ZIP으로 업데이트해 주세요.`;
       if(result.pending&&['downloading','waiting','applying','failed'].includes(result.pending.state))showState(result.pending);
       else {pending=result.pending;clearTimeout(timer);}

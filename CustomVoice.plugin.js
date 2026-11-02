@@ -1,8 +1,8 @@
 /**
  * @name CustomVoice
  * @author CustomVoice contributors
- * @version 1.1.5
- * @nativeVersion 1.1.5
+ * @version 1.1.6
+ * @nativeVersion 1.1.6
  * @description Independent LiveKit voice channels inside Discord.
  * @source https://github.com/awizc/CustomVoice-plugin
  * @updateUrl https://api.github.com/repos/awizc/CustomVoice-plugin/contents/CustomVoice.plugin.js?ref=main
@@ -56317,7 +56317,7 @@ function createServerSetup(manager, compat) {
 }
 
 // package.json
-var version3 = "1.1.5";
+var version3 = "1.1.6";
 
 // src/components/settings.ts
 function createSettingsPanel(manager, compat) {
@@ -56561,7 +56561,8 @@ function createSettingsPanel(manager, compat) {
   error62.setAttribute("role", "alert");
   const status = paragraph("");
   status.setAttribute("role", "status");
-  paragraph("업데이트 저장소: awizc/CustomVoice-plugin (private). 접근 권한과 Contents 읽기 권한이 있는 GitHub 토큰을 사용합니다.");
+  paragraph("업데이트 저장소: awizc/CustomVoice-plugin. native 1.1.6부터 공개 저장소는 토큰 없이 업데이트합니다. 비공개 저장소 접근에는 Contents 읽기 권한이 있는 GitHub 토큰이 필요합니다.");
+  if (globalThis.CustomVoiceNative?.version && newerVersion("1.1.6", globalThis.CustomVoiceNative.version)) paragraph("현재 native에서는 공개 저장소도 토큰이 필요합니다. 토큰 없이 사용하려면 1.1.6 이상 전체 ZIP으로 먼저 업데이트해 주세요.");
   const githubToken = document.createElement("input");
   githubToken.type = "password"; githubToken.autocomplete = "off"; githubToken.spellcheck = false;
   githubToken.placeholder = "새 GitHub 토큰 입력";
@@ -57376,7 +57377,7 @@ function ShareQuality({ manager }) {
       ? "테두리 숨김이 허용되었습니다. 다른 캡처 앱이 사용 중이면 테두리가 남을 수 있습니다."
       : "");
   const bridge = globalThis.CustomVoiceNative;
-  const restartNotice = bridge && (newerVersion("1.1.5", bridge.version ?? "0.0.0") || captureControl && newerVersion("1.1.5", captureInfo?.hostVersion ?? "0.0.0"))
+  const restartNotice = bridge && (newerVersion("1.1.6", bridge.version ?? "0.0.0") || captureControl && newerVersion("1.1.6", captureInfo?.hostVersion ?? "0.0.0"))
     ? "이전 캡처 연결이 로드되어 있습니다. Discord를 완전히 종료한 뒤 다시 실행하면 최신 개선 사항이 적용됩니다."
     : "";
   const borderToggle = import_react4.default.createElement("label", {
@@ -58854,7 +58855,7 @@ var PluginUpdater = class {
       if(this.candidate?.expires<=Date.now())this.candidate=null;
       if(this.active()){delay=30000;if(notify)this.toast('통화와 방송을 종료하면 30초 이내에 업데이트를 다시 확인합니다.');return;}
       const bridge=globalThis.CustomVoiceNative;
-      if(!bridge?.getUpdateSource)throw Error('private 저장소 업데이트에는 최신 native 설치와 Discord 완전 재시작이 필요합니다.');
+      if(!bridge?.getUpdateSource)throw Error('업데이트에는 최신 native 설치와 Discord 완전 재시작이 필요합니다.');
       const cached=this.candidate;this.candidate=null;
       const result=cached?.result??await bridge.getUpdateSource(this.commit);
       if(!current())return;
@@ -58883,7 +58884,7 @@ var PluginUpdater = class {
         this.candidate=null;this.commit='';
         delay=Math.min(900000,60000*2**Math.min(this.failures++,4));
         const message=error?.message??String(error);
-        if(this.lastError!==message||Date.now()-(this.lastErrorAt??0)>=900000){this.lastError=message;this.lastErrorAt=Date.now();try{customVoiceLog('warn','[CustomVoice] Private update',message);}catch{}}
+        if(this.lastError!==message||Date.now()-(this.lastErrorAt??0)>=900000){this.lastError=message;this.lastErrorAt=Date.now();try{customVoiceLog('warn','[CustomVoice] Plugin update',message);}catch{}}
         if(notify)this.toast(message,'error');
       }
     }finally{this.busy=false;if(current())this.schedule(delay);}
@@ -58959,7 +58960,7 @@ function createNativeUpdatePanel() {
     try{
       const result=await bridge().checkNativeUpdate();if(disposed||request!==revision)return;info=result;
       status.textContent=result.available?`native ${result.latestVersion} 업데이트가 있습니다.`:'native는 최신 버전입니다.';
-      const required='1.1.5';
+      const required='1.1.6';
       if(newerVersion(required,result.installedVersion)&&newerVersion(required,result.latestVersion))status.textContent=`이 플러그인에 필요한 native ${required}가 정식 릴리스에 아직 없습니다. 전체 ZIP으로 업데이트해 주세요.`;
       if(result.pending&&['downloading','waiting','applying','failed'].includes(result.pending.state))showState(result.pending);
       else {pending=result.pending;clearTimeout(timer);}

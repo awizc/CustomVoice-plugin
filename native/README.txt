@@ -1,5 +1,11 @@
 CustomVoice native GPU capture (Windows x64)
 
+1.1.6 공개 저장소 업데이트
+- 공개 저장소 업데이트에는 GitHub 토큰이 필요하지 않습니다.
+- 비공개 저장소 접근용으로 등록한 암호화 토큰은 계속 사용할 수 있습니다.
+- 이전 native를 토큰 없이 사용 중이라면 1.1.6 전체 ZIP을 한 번 설치해 주세요.
+- 1.1.4 오디오 수정과 1.1.5 업데이트 개선을 모두 포함합니다. 실행 테스트 없이 빌드했습니다.
+
 1.1.5 업데이트 안정성
 - 플러그인 자동 업데이트와 버튼으로 실행하는 native 업데이트를 분리합니다.
 - 플러그인 커밋이 같으면 파일 재다운로드를 생략하고, 실패 시 간격을 늘려 재시도합니다.
@@ -29,7 +35,7 @@ CustomVoice native GPU capture (Windows x64)
 - private 저장소 접근에는 기존 암호화된 GitHub 토큰을 그대로 사용합니다.
 
 1.1.0
-- 저장소/업데이트 경로: https://github.com/awizc/CustomVoice-plugin (private)
+- 저장소/업데이트 경로: https://github.com/awizc/CustomVoice-plugin
 - 접속/퇴장, 마이크/헤드셋 토글, 방송 시작/종료 효과음과 볼륨 설정.
 - 방송 유저 위에 마우스를 올리거나 클릭하면 같은 음성 채널의 방송 썸네일 표시.
   썸네일은 송출자/시청자 모두 1.1.0이 필요합니다. 실제 시청 구독이나 오디오는 켜지지 않습니다.
@@ -41,7 +47,7 @@ CustomVoice native GPU capture (Windows x64)
 - 연결 해제 시 송출/시청 오디오 트랙과 구독을 즉시 정리합니다.
 - private 업데이트: 설정에서 저장소 Contents 읽기 권한의 GitHub 토큰 등록.
   토큰은 현재 Windows 사용자 DPAPI로 암호화해 BetterDiscord/data/CustomVoice에 저장합니다.
-  다른 사용자는 저장소 접근 권한과 자신의 토큰이 필요합니다.
+  비공개 저장소인 경우 다른 사용자도 저장소 접근 권한과 자신의 토큰이 필요합니다.
   1.1.1부터는 native를 설정창의 업데이트 버튼으로 별도 갱신합니다.
 - 이번 작업에서는 배포용 빌드만 수행하며 테스트·실측·computer-use는 수행하지 않습니다.
 

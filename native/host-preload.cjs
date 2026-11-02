@@ -77,7 +77,7 @@ function install({ allowTest = false } = {}) {
     deliver(message);
   });
   contextBridge.exposeInMainWorld('CustomVoiceNative', {
-    protocol: 2, version: '1.1.5', available: Boolean(textures?.importSharedTexture),
+    protocol: 2, version: '1.1.6', available: Boolean(textures?.importSharedTexture),
     async audioStart(source){const info=await ipcRenderer.invoke(prefix+'audio-start',source);audioSessions.add(info.session);return info;},
     audioActivate:(id,transport=1)=>ipcRenderer.invoke(prefix+'audio-activate',id,transport),
     audioConsumed:(id,sequence)=>{if(audioSessions.has(id))ipcRenderer.send(prefix+'audio-consumed',id,sequence);},
@@ -96,7 +96,7 @@ function install({ allowTest = false } = {}) {
         void ipcRenderer.invoke(prefix + 'stop', info.session).catch(() => {});
         throw new Error('Capture startup was superseded.');
       }
-      active.add(info.session); return { ...info, preloadVersion: '1.1.5' };
+      active.add(info.session); return { ...info, preloadVersion: '1.1.6' };
     },
     activate: (id, boundedDelivery = false) => {
       // Opt in so older renderer bundles remain compatible with this preload.

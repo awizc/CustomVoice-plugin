@@ -8,7 +8,7 @@ using System.Text.RegularExpressions;
 
 internal static class NativeUpdate
 {
-    internal const string CurrentVersion = "1.1.5";
+    internal const string CurrentVersion = "1.1.6";
     static string Plugins => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "BetterDiscord", "plugins");
     static string Root => Path.Combine(Path.GetDirectoryName(Plugins)!, "data", "CustomVoice", "native-updates");
     static string StateFile => Path.Combine(Root, "status.json");
