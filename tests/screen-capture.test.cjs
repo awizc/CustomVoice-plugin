@@ -23,7 +23,7 @@ function mediaStream(...tracks) {
   };
 }
 
-function harness({ getUserMedia, sourceId = 'window:42:0', pick, bridge = true, AudioTrack, configure = async () => {} } = {}) {
+function harness({ getUserMedia, getSources, sourceId = 'screen:7:0', pick, bridge = true, AudioTrack, processAudio, nativeStart, configure = async () => {} } = {}) {
   const requests = [], warnings = [], toasts = [];
   class LocalTrack {
     constructor(track) { this.mediaStreamTrack = track; this.kind = track.kind; }
@@ -31,6 +31,10 @@ function harness({ getUserMedia, sourceId = 'window:42:0', pick, bridge = true, 
   }
   const context = vm.createContext({
     DOMException,
+    require: name => { assert.equal(name, 'process'); return { platform: 'win32' }; },
+    nativeScreenCaptures: new WeakMap(),
+    MediaStream: function(tracks) { return mediaStream(...tracks); },
+    createProcessAudioModule: () => ({start: processAudio ?? (async () => { throw new Error('Process capture unavailable'); })}),
     fixScreenCapture: configure,
     console: { warn: (...args) => warnings.push(args) },
     customVoiceLog: (_level, ...args) => warnings.push(args),
@@ -39,14 +43,15 @@ function harness({ getUserMedia, sourceId = 'window:42:0', pick, bridge = true, 
       return getUserMedia(constraints, requests.length);
     } } },
     DiscordNative: bridge ? { desktopCapture: {
-      getDesktopCaptureSources: async () => [{ id: sourceId, name: 'Selected source' }]
+      getDesktopCaptureSources: getSources ?? (async () => [{ id: sourceId, name: 'Selected source' }])
     } } : undefined,
     BdApi: { UI: { showToast: (...args) => toasts.push(args) } },
     LocalVideoTrack: LocalTrack,
     LocalAudioTrack: AudioTrack ?? LocalTrack,
-    Track: { Source: { ScreenShare: 'screen_share', ScreenShareAudio: 'screen_share_audio' } }
+    Track: { Kind: { Audio: 'audio', Video: 'video' }, Source: { ScreenShare: 'screen_share', ScreenShareAudio: 'screen_share_audio' } }
   });
   vm.runInContext(adapter, context);
+  if (nativeStart) context.nativeCaptureModule = { ...context.createNativeCaptureModule(), start: nativeStart };
   const capture = context.discordScreenCapture(pick ?? (async () => sourceId));
   const controller = new AbortController();
   const start = (audio = false, nativeCapture = () => assert.fail('Unexpected native fallback')) =>
@@ -54,7 +59,7 @@ function harness({ getUserMedia, sourceId = 'window:42:0', pick, bridge = true, 
   return { start, capture, controller, requests, warnings, toasts };
 }
 
-for (const sourceId of ['window:42:0', 'screen:7:0']) {
+for (const sourceId of ['screen:7:0']) {
   test(`${sourceId}: captures selected video separately from system loopback audio`, async () => {
     const video = mediaTrack('video'), dummyVideo = mediaTrack('video'), audio = mediaTrack('audio');
     const h = harness({ sourceId, getUserMedia: async constraints => {
@@ -80,9 +85,9 @@ for (const sourceId of ['window:42:0', 'screen:7:0']) {
   });
 }
 
-test('retries a video startup failure once without imposing an initial frame rate', async () => {
+test('retries a Chromium screen startup failure once without imposing an initial frame rate', async () => {
   const video = mediaTrack('video');
-  const h = harness({ getUserMedia: async (_, attempt) => {
+  const h = harness({ sourceId: 'screen:7:0', getUserMedia: async (_, attempt) => {
     if (attempt === 1) throw new DOMException('Could not start video source', 'NotReadableError');
     return mediaStream(video);
   } });
@@ -91,7 +96,7 @@ test('retries a video startup failure once without imposing an initial frame rat
   assert.equal(h.requests.length, 2);
   assert.equal(h.requests[0].video.mandatory.maxFrameRate, 60);
   assert.equal(h.requests[1].video.mandatory.maxFrameRate, undefined);
-  assert.equal(h.requests[1].video.mandatory.chromeMediaSourceId, 'window:42:0');
+  assert.equal(h.requests[1].video.mandatory.chromeMediaSourceId, 'screen:7:0');
   assert.equal(h.requests[1].audio, false);
 });
 
@@ -126,7 +131,7 @@ test('system audio failure preserves video and visibly reports video-only sharin
   assert.match(h.toasts[0][0], /화면만 공유/);
 });
 
-test('turning on audio after video started does not recapture the selected window', async () => {
+test('turning on system audio after video started does not recapture the selected screen', async () => {
   const video = mediaTrack('video'), dummyVideo = mediaTrack('video'), audio = mediaTrack('audio');
   const h = harness({ getUserMedia: async constraints => constraints.audio ? mediaStream(dummyVideo, audio) : mediaStream(video) });
   await h.start(false);
@@ -208,7 +213,9 @@ test('cancelled selection never opens a capture device', async () => {
 test('browser fallback still uses the native source picker', async () => {
   const h = harness({ bridge: false });
   const expected = [{ kind: 'video' }];
-  assert.equal(await h.start(false, async () => expected), expected);
+  const tracks = await h.start(false, async () => expected);
+  assert.equal(tracks.length, 1);
+  assert.equal(tracks[0], expected[0]);
   assert.equal(h.requests.length, 0);
 });
 
@@ -236,4 +243,37 @@ test('capture profile failure releases raw video before audio is opened', async 
   await assert.rejects(h.start(true), /Bad profile/);
   assert.equal(video.readyState, 'ended');
   assert.equal(h.requests.length, 1);
+});
+
+test('window audio uses only process capture; a failure cannot open system loopback', async () => {
+  const video=mediaTrack('video'),audio=mediaTrack('audio');let source;
+  const h=harness({sourceId:'window:42:0',nativeStart:async id=>{assert.equal(id,'window:42:0');return {track:video};},processAudio:async id=>{source=id;return audio;}});
+  const tracks=await h.start(true);assert.equal(source,'window:42:0');assert.equal(h.requests.length,0);assert.equal(tracks[0].mediaStreamTrack,video);assert.equal(tracks[1].mediaStreamTrack,audio);assert.equal(audio.contentHint,'music');
+  const failed=harness({sourceId:'window:42:0',nativeStart:async()=>({track:mediaTrack('video')})});
+  assert.equal((await failed.start(true)).length,1);assert.equal(failed.requests.length,0);assert.equal(failed.toasts.length,1);
+});
+
+test('a process audio track is stopped if wrapping fails or selection is cancelled', async () => {
+  const audio=mediaTrack('audio'),h=harness({sourceId:'window:42:0',nativeStart:async()=>({track:mediaTrack('video')}),processAudio:async()=>audio,AudioTrack:class{constructor(){throw Error('wrapper failed');}}});
+  await h.start(true);assert.equal(audio.readyState,'ended');
+  const late=mediaTrack('audio'),cancelled=harness({sourceId:'window:42:0',nativeStart:async()=>({track:mediaTrack('video')}),processAudio:async()=>{cancelled.controller.abort();return late;}});
+  await assert.rejects(cancelled.start(true),{name:'AbortError'});assert.equal(late.readyState,'ended');
+});
+
+test('a native window startup error retains its diagnostics without starting another capture', async () => {
+  const cause = new Error('GPU 영상 변환 실패 (원본 1296×759): 0x80070057');
+  let audioStarted = false;
+  const h = harness({sourceId:'window:42:0', nativeStart:async()=>{throw cause;}, processAudio:async()=>{audioStarted=true;}});
+  await assert.rejects(h.start(true), error => error === cause);
+  assert.equal(h.requests.length, 0);
+  assert.equal(audioStarted, false);
+});
+
+test('a window added by picker refresh is accepted by capture source validation', async () => {
+  let lists=0;
+  const video=mediaTrack('video');
+  const h=harness({getSources:async()=>++lists===1?[{id:'screen:7:0',name:'Monitor'}]:[{id:'window:42:0',name:'osu!'}],
+    pick:async(sources,_signal,_options,refresh)=>{assert.equal(sources[0].id,'screen:7:0');await refresh();return 'window:42:0';},
+    nativeStart:async id=>{assert.equal(id,'window:42:0');return {track:video};}});
+  const tracks=await h.start();assert.equal(tracks[0].mediaStreamTrack,video);assert.equal(h.requests.length,0);
 });

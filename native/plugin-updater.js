@@ -126,7 +126,7 @@ function createNativeUpdatePanel() {
     try{
       const result=await bridge().checkNativeUpdate();if(disposed||request!==revision)return;info=result;
       status.textContent=result.available?`native ${result.latestVersion} 업데이트가 있습니다.`:'native는 최신 버전입니다.';
-      const required='1.1.6';
+      const required='1.1.12';
       if(newerVersion(required,result.installedVersion)&&newerVersion(required,result.latestVersion))status.textContent=`이 플러그인에 필요한 native ${required}가 정식 릴리스에 아직 없습니다. 전체 ZIP으로 업데이트해 주세요.`;
       if(result.pending&&['downloading','waiting','applying','failed'].includes(result.pending.state))showState(result.pending);
       else {pending=result.pending;clearTimeout(timer);}

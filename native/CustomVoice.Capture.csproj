@@ -15,6 +15,11 @@
     <Compile Include="Program.cs" />
     <Compile Include="FramePacer.cs" />
     <Compile Include="CaptureBorder.cs" />
+    <Compile Include="CaptureGeometry.cs" />
+    <Compile Include="WindowSources.cs" />
+    <Compile Include="FullscreenDesktopCapture.cs" />
+    <Compile Include="GameHookProtocol.cs" />
+    <Compile Include="GameHookCapture.cs" />
     <Compile Include="NativeInstaller.cs" />
     <Compile Include="ProcessAudio.cs" />
     <Compile Include="GithubUpdate.cs" />

@@ -41,6 +41,11 @@ internal static class Program
             if (args.Length == 1 && args[0] is "--install" or "--remove")
                 return NativeInstaller.Run(args[0] == "--remove");
             Native.SetProcessDpiAwarenessContext(new nint(-4));
+            if (args.Length == 1 && args[0] == "--list-windows")
+            {
+                Send(new { type = "sources", sources = WindowSources.List() });
+                return 0;
+            }
             if (args.Length == 1 && args[0] == "--check")
             {
                 Send(new { type = "capabilities", supported = GraphicsCaptureSession.IsSupported(), minUpdateInterval = ApiInformation.IsPropertyPresent("Windows.Graphics.Capture.GraphicsCaptureSession", "MinUpdateInterval"), runtimePath = typeof(object).Assembly.Location });
@@ -92,6 +97,21 @@ internal sealed class Capture : IDisposable
     readonly Direct3D11CaptureFramePool pool;
     readonly GraphicsCaptureSession session;
     readonly CaptureBorder border;
+    readonly FullscreenDesktopCapture? fullscreen;
+    readonly GameHookCapture? gameHook;
+    bool gameMode;
+    string Backend => gameMode ? gameHook!.Backend : desktopMode ? "DXGI-D3D11" : "WGC-D3D11";
+    readonly nint targetWindow;
+    RectI contentRegion;
+    bool regionValid;
+    bool placeholderReady;
+    bool sourceAvailable;
+    bool holdingFrame;
+    double nextRegionUpdate;
+    bool desktopMode;
+    long desktopEpoch = -1;
+    SizeInt32 windowSize;
+    double lastSourceAt;
     // Bounded GPU pool: hardware encoders may retain several frames. Eight NV12
     // 1080p surfaces use about 24 MiB of GPU memory, without a CPU frame queue.
     readonly Slot[] slots = Enumerable.Range(0, 8).Select(i => new Slot(i)).ToArray();
@@ -105,6 +125,8 @@ internal sealed class Capture : IDisposable
     Thread? outputThread;
     Direct3D11CaptureFrame? retainedFrame;
     ID3D11Texture2D? cachedTexture;
+    ID3D11Texture2D? lastPresentedTexture;
+    long lastPresentedRevision = -1;
     ID3D11VideoProcessorOutputView? cachedView;
     bool cachedReady;
     long revision, lastOutputRevision = -1, repeated;
@@ -124,13 +146,33 @@ internal sealed class Capture : IDisposable
         parentHandle = Native.OpenProcess(0x0040, false, parentPid);
         if (parentHandle == 0) throw new System.ComponentModel.Win32Exception();
         // Select the same HWND/device index selected in Discord's source picker.
+        targetWindow = FullscreenDesktopCapture.WindowFromSource(source);
+        bool minimizedAtStart = FullscreenDesktopCapture.IsMinimized(targetWindow);
         item = Native.CreateItem(source);
         inputSize = item.Size;
-        D3D11CreateDevice(null, DriverType.Hardware, DeviceCreationFlags.BgraSupport | DeviceCreationFlags.VideoSupport,
+        bool fullscreenCompatibility = targetWindow != 0;
+        if (fullscreenCompatibility)
+        {
+            var monitor = FullscreenDesktopCapture.MonitorSize(targetWindow);
+            var initial = CaptureGeometry.InitialSurface(inputSize.Width, inputSize.Height,
+                minimizedAtStart || FullscreenDesktopCapture.IsMinimized(targetWindow), monitor.Width, monitor.Height);
+            inputSize = new SizeInt32 { Width = initial.Width, Height = initial.Height };
+        }
+        windowSize = inputSize;
+        contentRegion = new RectI(0, 0, inputSize.Width, inputSize.Height);
+        if (targetWindow != 0 && FullscreenDesktopCapture.ClientRegion(targetWindow, inputSize) is RectI client) { contentRegion = client; regionValid = true; }
+        else regionValid = targetWindow == 0;
+        using var adapter = fullscreenCompatibility ? FullscreenDesktopCapture.AdapterFor(targetWindow) : null;
+        D3D11CreateDevice(adapter, adapter == null ? DriverType.Hardware : DriverType.Unknown, DeviceCreationFlags.BgraSupport | DeviceCreationFlags.VideoSupport,
             new[] { FeatureLevel.Level_11_1, FeatureLevel.Level_11_0 }, out device, out context).CheckError();
         using (var threaded = context.QueryInterface<ID3D11Multithread>()) threaded.SetMultithreadProtected(true);
         videoDevice = device.QueryInterface<ID3D11VideoDevice>();
         videoContext = context.QueryInterface<ID3D11VideoContext>();
+        if (fullscreenCompatibility)
+        {
+            fullscreen = new FullscreenDesktopCapture(targetWindow, device);
+            gameHook = new GameHookCapture(targetWindow, device, context);
+        }
         using (var dxgiDevice = device.QueryInterface<IDXGIDevice>())
         {
             Marshal.ThrowExceptionForHR(Native.CreateDirect3D11DeviceFromDXGIDevice(dxgiDevice.NativePointer, out var ptr));
@@ -150,13 +192,14 @@ internal sealed class Capture : IDisposable
             await GraphicsCaptureAccess.RequestAccessAsync(GraphicsCaptureAccessKind.Borderless) == AppCapabilityAccessStatus.Allowed,
             visible => { lock (gate) { if (disposed) throw new ObjectDisposedException(nameof(Capture)); session.IsBorderRequired = visible; } });
         RebuildProcessor();
+        if (targetWindow != 0) EnsurePlaceholder();
         item.Closed += OnClosed;
         pool.FrameArrived += OnFrame;
     }
 
     public void Start()
     {
-        Program.Send(new { type = "ready", protocol = 1, width = outputWidth, height = outputHeight, sourceWidth = inputSize.Width, sourceHeight = inputSize.Height, fps, intervalMs = session.MinUpdateInterval.TotalMilliseconds, backend = "WGC-D3D11", cadence = "paced", adaptivePacing = true, borderControl = true, borderVisible = true });
+        Program.Send(new { type = "ready", protocol = 1, width = outputWidth, height = outputHeight, sourceWidth = inputSize.Width, sourceHeight = inputSize.Height, fps, sourceAvailable, holdingFrame, intervalMs = session.MinUpdateInterval.TotalMilliseconds, backend = "WGC-D3D11", fullscreenCompatibility = fullscreen != null, windowClientOnly = targetWindow != 0, cadence = "paced", adaptivePacing = true, borderControl = true, borderVisible = true });
         session.StartCapture();
         outputThread = new Thread(OutputLoop) { IsBackground = true, Name = "CustomVoice GPU frame pacing" };
         outputThread.Start();
@@ -176,7 +219,9 @@ internal sealed class Capture : IDisposable
             if (disposed) return;
             fps = rate; pacingFps = rate; pacingUpdated = 0; quality = resolution;
             RebuildProcessor();
-            if (retainedFrame != null) UpdateCache(retainedFrame);
+            if (gameMode) { cachedReady = false; }
+            else if (desktopMode) { fullscreen?.Invalidate(); desktopEpoch = -1; }
+            else if (regionValid && retainedFrame != null) UpdateCache(retainedFrame);
             Program.Send(new { type = "configured", request, width = outputWidth, height = outputHeight, sourceWidth = inputSize.Width, sourceHeight = inputSize.Height, fps });
         }
     }
@@ -186,6 +231,7 @@ internal sealed class Capture : IDisposable
         if (!double.IsFinite(rate) || rate < 1 || rate > 165) return;
         lock (gate)
         {
+            if (!sourceAvailable) return;
             pacingFps = Math.Min(rate, fps);
             pacingUpdated = Microseconds();
         }
@@ -202,18 +248,21 @@ internal sealed class Capture : IDisposable
         catch { /* The owner may already have closed its pipe. */ }
     }
 
-    double EffectiveFps(double now) => pacingUpdated != 0 && now - pacingUpdated < 10e6 ? pacingFps : fps;
+    double EffectiveFps(double now) => Math.Min(placeholderReady ? 10 : fps, pacingUpdated != 0 && now - pacingUpdated < 10e6 ? pacingFps : fps);
 
     void RebuildProcessor()
     {
+        CaptureGeometry.Validate(inputSize.Width, inputSize.Height, contentRegion);
+        pacingFps = fps; pacingUpdated = 0;
         var targetWidth = quality == "1440p" ? 2560 : quality == "1080p" ? 1920 : 1280;
         var targetHeight = quality == "1440p" ? 1440 : quality == "1080p" ? 1080 : 720;
-        var scale = quality == "source" ? 1 : Math.Min(1, Math.Min((double)targetWidth / inputSize.Width, (double)targetHeight / inputSize.Height));
+        int contentWidth = contentRegion.Right - contentRegion.Left, contentHeight = contentRegion.Bottom - contentRegion.Top;
+        var scale = quality == "source" ? 1 : Math.Min(1, Math.Min((double)targetWidth / contentWidth, (double)targetHeight / contentHeight));
         // NV12 uses 2x2 chroma blocks. Only remove an odd edge pixel, never lower
         // the requested preset or upscale a smaller source.
-        outputWidth = Math.Max(2, (int)(inputSize.Width * scale) & ~1);
-        outputHeight = Math.Max(2, (int)(inputSize.Height * scale) & ~1);
-        cachedReady = false;
+        outputWidth = Math.Max(2, (int)(contentWidth * scale) & ~1);
+        outputHeight = Math.Max(2, (int)(contentHeight * scale) & ~1);
+        cachedReady = false; placeholderReady = false;
         cachedSourceRevision = -1;
         cachedView?.Dispose(); cachedTexture?.Dispose();
         cachedView = null; cachedTexture = null;
@@ -229,7 +278,7 @@ internal sealed class Capture : IDisposable
         processor = videoDevice.CreateVideoProcessor(enumerator, 0);
         videoContext.VideoProcessorSetStreamFrameFormat(processor, 0, VideoFrameFormat.Progressive);
         videoContext.VideoProcessorSetStreamAutoProcessingMode(processor, 0, false);
-        videoContext.VideoProcessorSetStreamSourceRect(processor, 0, true, new RectI(0, 0, inputSize.Width, inputSize.Height));
+        videoContext.VideoProcessorSetStreamSourceRect(processor, 0, true, contentRegion);
         videoContext.VideoProcessorSetStreamDestRect(processor, 0, true, new RectI(0, 0, outputWidth, outputHeight));
         videoContext.VideoProcessorSetOutputTargetRect(processor, true, new RectI(0, 0, outputWidth, outputHeight));
         using var colors = videoContext.QueryInterface<ID3D11VideoContext1>();
@@ -247,12 +296,118 @@ internal sealed class Capture : IDisposable
     void UpdateCache(Direct3D11CaptureFrame frame)
     {
         using var source = Native.GetTexture(frame.Surface);
-        using var inputView = videoDevice.CreateVideoProcessorInputView(source, enumerator!, new VideoProcessorInputViewDescription { ViewDimension = VideoProcessorInputViewDimension.Texture2D });
-        videoContext.VideoProcessorBlt(processor!, cachedView!, 0, new[] { new VideoProcessorStream { Enable = true, InputSurface = inputView } }).CheckError();
+        UpdateCache(source);
+    }
+
+    void UpdateSize(SizeInt32 size)
+    {
+        RectI? region = gameMode || desktopMode || targetWindow == 0 ? new RectI(0, 0, size.Width, size.Height) : FullscreenDesktopCapture.ClientRegion(targetWindow, size);
+        regionValid = region.HasValue;
+        if (region == null) { if (!placeholderReady) cachedReady = false; return; }
+        if (size.Width == inputSize.Width && size.Height == inputSize.Height && contentRegion.Equals(region.Value)) return;
+        inputSize = size; contentRegion = region.Value; RebuildProcessor();
+        Program.Send(new { type = "resized", width = outputWidth, height = outputHeight, sourceWidth = size.Width, sourceHeight = size.Height, fps });
+    }
+
+    void EnsurePlaceholder()
+    {
+        if (cachedReady && placeholderReady) return;
+        if (lastPresentedTexture != null)
+        {
+            RestorePresentedFrame();
+            cachedReady = placeholderReady = holdingFrame = true;
+            cachedSourceRevision = -1; revision++;
+            SetSourceAvailable(false);
+            return;
+        }
+        // Before any game frame has been submitted, use an owned startup frame.
+        using var black = device.CreateTexture2D(new Texture2DDescription {
+            Width = (uint)inputSize.Width, Height = (uint)inputSize.Height, MipLevels = 1, ArraySize = 1,
+            Format = Format.B8G8R8A8_UNorm, SampleDescription = new SampleDescription(1, 0),
+            Usage = ResourceUsage.Default, BindFlags = BindFlags.RenderTarget
+        });
+        using var view = device.CreateRenderTargetView(black);
+        context.ClearRenderTargetView(view, new Color4(0, 0, 0, 1));
+        UpdateCache(black, synthetic: true); context.Flush();
+    }
+
+    void RememberPresentedFrame()
+    {
+        if (!sourceAvailable || placeholderReady || lastPresentedRevision == revision) return;
+        var description = cachedTexture!.Description;
+        if (lastPresentedTexture == null || lastPresentedTexture.Description.Width != description.Width || lastPresentedTexture.Description.Height != description.Height)
+        {
+            lastPresentedTexture?.Dispose();
+            lastPresentedTexture = device.CreateTexture2D(description);
+        }
+        context.CopyResource(lastPresentedTexture, cachedTexture); context.Flush();
+        lastPresentedRevision = revision;
+    }
+
+    void RestorePresentedFrame()
+    {
+        var saved = lastPresentedTexture!.Description;
+        if (saved.Width == outputWidth && saved.Height == outputHeight)
+            context.CopyResource(cachedTexture!, lastPresentedTexture);
+        else
+        {
+            // A quality change while minimized may need to resize the saved
+            // NV12 image. Its color space and coordinates differ from WGC BGRA.
+            using var heldEnumerator = videoDevice.CreateVideoProcessorEnumerator(new VideoProcessorContentDescription {
+                InputFrameFormat = VideoFrameFormat.Progressive, InputFrameRate = new Rational(10, 1), OutputFrameRate = new Rational(10, 1),
+                InputWidth = saved.Width, InputHeight = saved.Height, OutputWidth = (uint)outputWidth, OutputHeight = (uint)outputHeight, Usage = VideoUsage.PlaybackNormal
+            });
+            using var heldProcessor = videoDevice.CreateVideoProcessor(heldEnumerator, 0);
+            videoContext.VideoProcessorSetStreamFrameFormat(heldProcessor, 0, VideoFrameFormat.Progressive);
+            videoContext.VideoProcessorSetStreamAutoProcessingMode(heldProcessor, 0, false);
+            videoContext.VideoProcessorSetStreamSourceRect(heldProcessor, 0, true, new RectI(0, 0, (int)saved.Width, (int)saved.Height));
+            videoContext.VideoProcessorSetStreamDestRect(heldProcessor, 0, true, new RectI(0, 0, outputWidth, outputHeight));
+            videoContext.VideoProcessorSetOutputTargetRect(heldProcessor, true, new RectI(0, 0, outputWidth, outputHeight));
+            using var colors = videoContext.QueryInterface<ID3D11VideoContext1>();
+            colors.VideoProcessorSetStreamColorSpace1(heldProcessor, 0, ColorSpaceType.YcbcrStudioG22LeftP709);
+            colors.VideoProcessorSetOutputColorSpace1(heldProcessor, ColorSpaceType.YcbcrStudioG22LeftP709);
+            using var input = videoDevice.CreateVideoProcessorInputView(lastPresentedTexture, heldEnumerator, new VideoProcessorInputViewDescription { ViewDimension = VideoProcessorInputViewDimension.Texture2D });
+            using var output = videoDevice.CreateVideoProcessorOutputView(cachedTexture!, heldEnumerator, new VideoProcessorOutputViewDescription { ViewDimension = VideoProcessorOutputViewDimension.Texture2D });
+            videoContext.VideoProcessorBlt(heldProcessor, output, 0, new[] { new VideoProcessorStream { Enable = true, InputSurface = input } }).CheckError();
+        }
+        context.Flush();
+    }
+
+    void SetSourceAvailable(bool available)
+    {
+        if (sourceAvailable == available) return;
+        sourceAvailable = available; pacingFps = fps; pacingUpdated = 0;
+        Program.Send(new { type = "source-state", sourceAvailable, holdingFrame });
+    }
+
+    void UpdateCache(ID3D11Texture2D source, bool synthetic = false)
+    {
+        try
+        {
+            using var inputView = videoDevice.CreateVideoProcessorInputView(source, enumerator!, new VideoProcessorInputViewDescription { ViewDimension = VideoProcessorInputViewDimension.Texture2D });
+            videoContext.VideoProcessorBlt(processor!, cachedView!, 0, new[] { new VideoProcessorStream { Enable = true, InputSurface = inputView } }).CheckError();
+        }
+        catch (Exception error)
+        {
+            throw new InvalidOperationException($"GPU 영상 변환 실패 (원본 {inputSize.Width}×{inputSize.Height}, 영역 [{contentRegion.Left}, {contentRegion.Top}, {contentRegion.Right}, {contentRegion.Bottom}], 출력 {outputWidth}×{outputHeight}): {error.Message}", error);
+        }
         cachedReady = true; cachedSourceRevision = sourceRevision; revision++; conversions++;
+        placeholderReady = synthetic;
+        holdingFrame = false;
+        SetSourceAvailable(!synthetic);
     }
 
     static double Microseconds() => Stopwatch.GetTimestamp() * 1e6 / Stopwatch.Frequency;
+
+    void UpdateGameCache(ID3D11Texture2D source, bool flip)
+    {
+        var size = source.Description;
+        UpdateSize(new SizeInt32 { Width = checked((int)size.Width), Height = checked((int)size.Height) });
+        using var videoContext1 = videoContext.QueryInterface<ID3D11VideoContext1>();
+        videoContext1.VideoProcessorSetStreamMirror(processor!, 0, flip, false, flip);
+        try { UpdateCache(source); }
+        finally { videoContext1.VideoProcessorSetStreamMirror(processor!, 0, false, false, false); }
+    }
 
     void Fail(Exception error)
     {
@@ -282,11 +437,24 @@ internal sealed class Capture : IDisposable
                 lock (gate)
                 {
                     if (disposed) return;
+                    bool desktop = !gameMode && fullscreen?.UpdateTarget() == true;
+                    if (desktop) gameHook?.StartOnce();
+                    // Hook selection happens in TryOutputFrame. Do not tear its
+                    // surface down when the selected game loses foreground.
+                    desktop &= !gameMode;
+                    if (desktop != desktopMode)
+                    {
+                        desktopMode = desktop; cachedReady = false; cachedSourceRevision = -1; desktopEpoch = -1; placeholderReady = false;
+                        retainedFrame?.Dispose(); retainedFrame = null;
+                        SetSourceAvailable(false); pacingFps = fps; pacingUpdated = 0;
+                        if (!desktop && !gameMode) UpdateSize(windowSize);
+                        Program.Send(new { type = "capture-mode", backend = Backend, fullscreenCompatibility = fullscreen != null, sourceAvailable });
+                    }
+                    TryOutputFrame(now);
                     step = 1e6 / EffectiveFps(now);
-                    if ((cachedReady || retainedFrame != null) && !TryOutputFrame(now)) dropped++;
                     if (statsClock.ElapsedMilliseconds - statsTime >= 2000)
                     {
-                        Program.Send(new { type = "stats", captured, frames, dropped, repeated, conversions, gpuContentions, outputAttempts, outputOverruns, outputWorkUs, pacingFps = EffectiveFps(now), elapsedMs = statsClock.ElapsedMilliseconds });
+                        Program.Send(new { type = "stats", captured, frames, dropped, repeated, conversions, gpuContentions, outputAttempts, outputOverruns, outputWorkUs, sourceAvailable, holdingFrame, sourceAgeMs = lastSourceAt == 0 ? (double?)null : (now - lastSourceAt) / 1000, backend = Backend, pacingFps = EffectiveFps(now), elapsedMs = statsClock.ElapsedMilliseconds });
                         statsTime = statsClock.ElapsedMilliseconds;
                     }
                 }
@@ -301,6 +469,52 @@ internal sealed class Capture : IDisposable
 
     bool TryOutputFrame(double now)
     {
+        if (!slots.Any(slot => !slot.Busy)) { dropped++; return false; }
+        bool hookFrame = gameHook?.TryRead(fps, (texture, flip) => {
+            bool changed = !gameMode;
+            gameMode = true; desktopMode = false;
+            if (changed) fullscreen?.Invalidate();
+            UpdateGameCache(texture, flip);
+            captured++; lastSourceAt = now;
+            if (changed) Program.Send(new { type = "capture-mode", backend = gameHook!.Backend, sourceAvailable, fullscreenCompatibility = true });
+        }) == true;
+        if (gameMode && gameHook?.Active != true)
+        {
+            gameMode = false; cachedReady = false; cachedSourceRevision = -1; placeholderReady = false;
+            UpdateSize(windowSize);
+            Program.Send(new { type = "capture-mode", backend = Backend, sourceAvailable = false, fullscreenCompatibility = true });
+        }
+        // Prepare dimensions before acquiring a shared output surface: a mode
+        // switch must never copy a newly sized texture into an old-size slot.
+        if (hookFrame) { /* The game surface above remains live across Alt-Tab. */ }
+        else if (gameMode) { /* A temporarily busy game buffer can reuse its last frame. */ }
+        else if (desktopMode)
+        {
+            bool fresh = fullscreen!.TryRead(texture => {
+                var description = texture.Description;
+                UpdateSize(new SizeInt32 { Width = checked((int)description.Width), Height = checked((int)description.Height) });
+                UpdateCache(texture); context.Flush();
+            });
+            if (fresh) { desktopEpoch = fullscreen.Epoch; captured++; lastSourceAt = now; }
+            if (desktopEpoch != fullscreen.Epoch || !fullscreen.StillEligible())
+            {
+                // An ordinary no-new-frame timeout can reuse the current cache;
+                // a lost duplication/focus must replace it with an owned frame.
+                if (!placeholderReady) cachedReady = false;
+                EnsurePlaceholder();
+            }
+        }
+        else
+        {
+            if (now >= nextRegionUpdate) { UpdateSize(windowSize); nextRegionUpdate = now + 250000; }
+            if (regionValid && retainedFrame != null && (!cachedReady || placeholderReady || cachedSourceRevision != sourceRevision)) UpdateCache(retainedFrame);
+            if (!regionValid && targetWindow != 0) EnsurePlaceholder();
+        }
+        if (!cachedReady)
+        {
+            if (targetWindow == 0) return false;
+            EnsurePlaceholder();
+        }
         foreach (var slot in slots)
         {
             if (slot.Busy) continue;
@@ -319,18 +533,22 @@ internal sealed class Capture : IDisposable
                 // WGC callbacks only retain the newest source. Perform one GPU
                 // conversion when output has a free surface, not for every
                 // captured frame that an overloaded encoder will later discard.
-                if (retainedFrame != null && (!cachedReady || cachedSourceRevision != sourceRevision)) UpdateCache(retainedFrame);
+                if (desktopMode && !placeholderReady && !fullscreen!.StillEligible()) { cachedReady = false; SetSourceAvailable(false); return false; }
                 context.CopyResource(slot.Texture!, cachedTexture!);
                 context.Flush();
             }
             finally { slot.Mutex.ReleaseSync(0); }
+            if (desktopMode && !placeholderReady && !fullscreen!.StillEligible()) { cachedReady = false; SetSourceAvailable(false); return false; }
+            // Save only a frame that passed the final foreground check and is
+            // being submitted. Never freeze an unvalidated desktop cache.
+            RememberPresentedFrame();
             slot.Busy = true; slot.Sequence = ++sequence;
             if (lastOutputRevision == revision) repeated++;
             lastOutputRevision = revision;
-            Program.Send(new { type = "frame", slot = slot.Index, sequence, revision, handle = slot.RemoteHandle.ToInt64().ToString(), width = outputWidth, height = outputHeight, timestamp = (long)now, format = "nv12" });
+            Program.Send(new { type = "frame", slot = slot.Index, sequence, revision, sourceAvailable, holdingFrame, handle = slot.RemoteHandle.ToInt64().ToString(), width = outputWidth, height = outputHeight, timestamp = (long)now, format = "nv12" });
             frames++; return true;
         }
-        return false;
+        dropped++; return false;
     }
 
     sealed class PacingTimer : WaitHandle
@@ -360,32 +578,33 @@ internal sealed class Capture : IDisposable
             {
                 frame = sender.TryGetNextFrame();
                 if (frame == null) return;
-                captured++;
+                if (FullscreenDesktopCapture.IsMinimized(targetWindow)) return;
+                if (!desktopMode && !gameMode) captured++;
                 // Consume the newest available source after a scheduling delay.
                 // Do not let old capture frames queue behind the output cadence.
                 for (var i = 0; i < 2; i++)
                 {
                     var newer = sender.TryGetNextFrame();
                     if (newer == null) break;
-                    frame.Dispose(); frame = newer; captured++;
+                    frame.Dispose(); frame = newer; if (!desktopMode && !gameMode) captured++;
                 }
                 var size = frame.ContentSize;
                 if (size.Width < 2 || size.Height < 2) return;
-                if (size.Width != inputSize.Width || size.Height != inputSize.Height)
+                if (size.Width != windowSize.Width || size.Height != windowSize.Height)
                 {
-                    inputSize = size;
+                    windowSize = size;
                     retainedFrame?.Dispose(); retainedFrame = null;
-                    RebuildProcessor();
+                    if (!desktopMode && !gameMode) UpdateSize(size);
                     // Recreate after disposing the old frame; this frame may still
                     // have the previous texture dimensions, so do not publish it.
                     frame.Dispose(); frame = null;
                     sender.Recreate(winrtDevice, DirectXPixelFormat.B8G8R8A8UIntNormalized, 3, size);
-                    Program.Send(new { type = "resized", width = outputWidth, height = outputHeight, sourceWidth = size.Width, sourceHeight = size.Height, fps });
                     return;
                 }
                 // Keep only the latest source. Conversion belongs to the paced
                 // output worker so input callbacks cannot flood the GPU queue.
                 sourceRevision++;
+                if (!desktopMode && !gameMode) lastSourceAt = Microseconds();
                 retainedFrame?.Dispose(); retainedFrame = frame; frame = null;
             }
             catch (Exception error) { Fail(error); }
@@ -430,10 +649,13 @@ internal sealed class Capture : IDisposable
         if (outputThread != Thread.CurrentThread) outputThread?.Join();
         retainedFrame?.Dispose(); retainedFrame = null;
         session.Dispose(); pool.Dispose();
+        fullscreen?.Dispose();
+        gameHook?.Dispose();
         lock (gate)
         {
             foreach (var slot in slots) slot.Clear(parentHandle);
             cachedView?.Dispose(); cachedTexture?.Dispose();
+            lastPresentedTexture?.Dispose(); lastPresentedTexture = null;
             processor?.Dispose(); enumerator?.Dispose();
             videoContext.Dispose(); videoDevice.Dispose(); context.Dispose(); device.Dispose(); winrtDevice.Dispose();
             Native.CloseHandle(parentHandle);

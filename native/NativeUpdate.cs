@@ -8,7 +8,7 @@ using System.Text.RegularExpressions;
 
 internal static class NativeUpdate
 {
-    internal const string CurrentVersion = "1.1.6";
+    internal const string CurrentVersion = "1.1.12";
     static string Plugins => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "BetterDiscord", "plugins");
     static string Root => Path.Combine(Path.GetDirectoryName(Plugins)!, "data", "CustomVoice", "native-updates");
     static string StateFile => Path.Combine(Root, "status.json");
@@ -153,8 +153,10 @@ internal static class NativeUpdate
             using var file = File.OpenRead(Within(payload, name));
             if (!Convert.ToHexString(SHA256.HashData(file)).Equals(item.GetProperty("sha256").GetString(), StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("native 배포 파일이 손상되었습니다.");
         }
-        foreach (string name in new[] { "CustomVoice.Capture.exe", "CustomVoice.Capture.dll", "CustomVoice.Capture.runtimeconfig.json", "coreclr.dll", "hostfxr.dll", "host-main.cjs", "host-preload.cjs", "audio-main.cjs", "github-main.cjs", "native-version.json" })
+        foreach (string name in new[] { "CustomVoice.Capture.exe", "CustomVoice.Capture.dll", "CustomVoice.Capture.runtimeconfig.json", "coreclr.dll", "hostfxr.dll", "host-main.cjs", "host-preload.cjs", "audio-main.cjs", "github-main.cjs", "window-sources-main.cjs", "native-version.json" })
             if (!names.Contains(name)) throw new InvalidDataException("native 배포 파일이 누락되었습니다.");
+        foreach (string name in new[] { "graphics-hook32.dll", "graphics-hook64.dll", "inject-helper32.exe", "inject-helper64.exe", "get-graphics-offsets32.exe", "get-graphics-offsets64.exe", "COPYING.txt", "NOTICE.txt", "OBS-Studio-32.0.4-Sources.tar.gz" })
+            if (!names.Contains("game-hook/" + name)) throw new InvalidDataException("게임 캡처 배포 파일이 누락되었습니다.");
         using var stamp = JsonDocument.Parse(File.ReadAllText(Path.Combine(payload, "native-version.json")));
         if (stamp.RootElement.GetProperty("version").GetString() != version) throw new InvalidDataException("native 배포 버전이 일치하지 않습니다.");
     }

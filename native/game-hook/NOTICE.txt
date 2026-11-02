@@ -1,0 +1,29 @@
+CustomVoice game capture components
+
+The six unmodified graphics-hook, inject-helper and get-graphics-offsets
+binaries are from the official OBS Studio 32.0.4 Windows x64 release.
+OBS Studio copyright (C) its respective contributors. Distributed under
+GNU GPL version 2 or later; see COPYING.txt. These components have NO WARRANTY.
+
+Binary release:
+https://github.com/obsproject/obs-studio/releases/download/32.0.4/OBS-Studio-32.0.4-Windows-x64.zip
+SHA256: fd367a7f156319426f1a600720c1288ad0011da168dff41e0f94dbb18cc1dc0f
+
+Complete corresponding OBS source (including release build scripts and
+submodules) is provided in this directory as OBS-Studio-32.0.4-Sources.tar.gz.
+https://github.com/obsproject/obs-studio/releases/download/32.0.4/OBS-Studio-32.0.4-Sources.tar.gz
+SHA256: d9e62ea24305fbfe14c69a6422de1525fe84da232df2cc0d7e4601a840bdbba8
+
+Protocol reference:
+shared/obs-hook-config/graphics-hook-info.h (hook ABI 1.8, 648 bytes)
+plugins/win-capture/game-capture.c
+plugins/win-capture/inject-helper/inject-helper.c
+plugins/win-capture/load-graphics-offsets.c
+
+CustomVoice does not install or launch the OBS application. These components
+are used only during a user-selected application broadcast, once that window
+is detected in the foreground covering its monitor. The capture session then
+stays attached across Alt-Tab and reads only that game's rendering surface.
+Existing capture ownership is respected. Stopping the broadcast signals the
+hook to stop capturing; the OBS hook library may remain loaded until the game
+exits, as designed upstream. No system-wide Vulkan layer is installed.

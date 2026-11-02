@@ -27,6 +27,7 @@ function install({ allowTest = false } = {}) {
   }
   require('./audio-main.cjs').install(trusted);
   require('./github-main.cjs').install(trusted);
+  require('./window-sources-main.cjs').install(trusted);
   ipcMain.handle(prefix + 'start', (event, sourceId, fps, quality) => {
     trusted(event); validate(fps, quality);
     if (typeof sourceId !== 'string' || !/^(screen|window):\d+:\d+$/.test(sourceId)) throw new Error('Invalid capture source.');
@@ -90,7 +91,7 @@ function install({ allowTest = false } = {}) {
             const message = JSON.parse(line);
             if (message.type === 'ready') {
               if (message.protocol !== 1 || message.intervalMs > 1.1) throw new Error('Unsupported native capture protocol.');
-              clearTimeout(timer); started = true; resolve({ ...message, session: id, hostVersion: '1.1.6', hostAdaptivePacing: true, hostBorderControl: true });
+              clearTimeout(timer); started = true; resolve({ ...message, session: id, hostVersion: '1.1.12', hostAdaptivePacing: true, hostBorderControl: true });
             } else if (message.type === 'frame') {
               if (active) notify('frame', message);
               else send({ type: 'release', slot: message.slot, sequence: message.sequence });

@@ -63,6 +63,19 @@ test('cancelling while native startup is pending also stops the late-created hel
   assert.equal(h.stopped, 1); assert.equal(h.writes, 0);
 });
 
+test('game capture mode labels and live source state cross the renderer bridge', async () => {
+  const h = rendererHarness(), control = await h.start();
+  h.emit('customvoice-native-status-v2', { event: 'source-state', sourceAvailable: false, holdingFrame: true });
+  for (const backend of ['GAME-HOOK-D3D11', 'GAME-HOOK-MEMORY']) {
+    h.emit('customvoice-native-status-v2', { event: 'capture-mode', backend, sourceAvailable: true, holdingFrame: false });
+    assert.match(control.backend, /게임 캡처/);
+    assert.equal(control.metadata.sourceAvailable, true);
+    assert.equal(control.metadata.holdingFrame, false);
+  }
+  assert.match(control.backend, /호환 모드/);
+  control.stop();
+});
+
 test('border permission never blocks initial frames; denial and old hosts do not stop sharing', async () => {
   let finish;const h=rendererHarness({borderControl:true,setBorder:()=>new Promise(resolve=>{finish=resolve;})});
   const control=await h.start(false);
@@ -148,6 +161,53 @@ test('cadence ignores transient drops and high parallel hardware encode latency,
   const duplicate = { ...slow, sample:{timestamp:1} };
   controller.update(duplicate); controller.update(duplicate); assert.equal(controller.fps,144);
   controller.update({...slow,sample:{timestamp:2}}); assert.equal(controller.fps,33);
+});
+
+test('Alt-Tab source waits cannot collapse cadence, and return-to-game skips stale zero-FPS samples', () => {
+  const cadence=rendererHarness().api.createCadenceController(165);
+  const stalled={encodeFps:0,captureFps:0,limitation:'none'};
+  // Before the fix, missing input was reported as dropped/backpressured output.
+  for(let i=0;i<12;i++)assert.equal(cadence.update(stalled,{sourceAvailable:false,backpressureFps:165,outputFps:0}),165);
+  cadence.recover();
+  for(let i=0;i<2;i++)assert.equal(cadence.update(stalled,{sourceAvailable:true,backpressureFps:165}),165);
+  assert.equal(cadence.update({encodeFps:165,captureFps:165,processingMs:2},{sourceAvailable:true}),165);
+  // Real sustained encoder pressure must still throttle, then recover again.
+  const overloaded={encodeFps:30,captureFps:165,processingMs:40};
+  cadence.update(overloaded,{sourceAvailable:true});cadence.update(overloaded,{sourceAvailable:true});assert.ok(cadence.fps<165);
+  cadence.recover();assert.equal(cadence.fps,165);
+});
+
+test('zero encoded frames with genuine backpressure back off gradually instead of jumping straight to 1 FPS',()=>{
+  const cadence=rendererHarness().api.createCadenceController(165);
+  const stats={encodeFps:0,captureFps:0},native={sourceAvailable:true,backpressureFps:165};
+  cadence.update(stats,native);assert.equal(cadence.update(stats,native),82.5);
+});
+
+test('mode and source recovery immediately restore native pace and state also arrives with frames',async()=>{
+  const h=rendererHarness({nativePacing:true}),control=await h.start();
+  const slow={encodeFps:30,captureFps:144,processingMs:25};
+  control.updateEncoderStats(slow);control.updateEncoderStats(slow);assert.equal(control.diagnostics.pacingFps,33);
+  h.emit('customvoice-native-status-v2',{event:'capture-mode',backend:'WGC-D3D11',sourceAvailable:false});
+  assert.equal(control.diagnostics.pacingFps,144);assert.equal(h.paces.at(-1),144);
+  for(let i=0;i<6;i++)control.updateEncoderStats({encodeFps:0,captureFps:0});
+  assert.equal(control.diagnostics.pacingFps,144);assert.equal(control.diagnostics.sourceAvailable,false);
+  h.emit('customvoice-native-frame-v2',{sourceAvailable:true,frame:{close(){}}});
+  assert.equal(control.diagnostics.sourceAvailable,true);assert.equal(h.paces.at(-1),144);
+  control.updateEncoderStats(slow);control.updateEncoderStats(slow);assert.equal(control.diagnostics.pacingFps,144);
+  control.updateEncoderStats(slow);control.updateEncoderStats(slow);assert.equal(control.diagnostics.pacingFps,33);
+  h.emit('customvoice-native-status-v2',{event:'resized',width:1920,height:1080});
+  assert.equal(control.diagnostics.pacingFps,144);
+  await new Promise(setImmediate);control.stop();
+});
+
+test('held-frame diagnostics follow frames even when source availability does not change',async()=>{
+  const h=rendererHarness({nativePacing:true}),control=await h.start();
+  h.emit('customvoice-native-status-v2',{event:'source-state',sourceAvailable:false,holdingFrame:false});
+  h.emit('customvoice-native-frame-v2',{sourceAvailable:false,holdingFrame:true,frame:{close(){}}});
+  assert.equal(control.diagnostics.holdingFrame,true);assert.equal(control.diagnostics.sourceAvailable,false);
+  h.emit('customvoice-native-frame-v2',{sourceAvailable:true,holdingFrame:false,frame:{close(){}}});
+  assert.equal(control.diagnostics.holdingFrame,false);assert.equal(control.diagnostics.sourceAvailable,true);
+  await new Promise(setImmediate);control.stop();
 });
 
 test('cadence handles a stalled encoder, low source cadence, and GPU backpressure without an encode-time sample', () => {
@@ -248,7 +308,7 @@ test('isolated preload retains GPU slots until Chromium releases all transferred
 for (const nativeCaptureModule of [{}, { stopAll() { throw new Error('Native cleanup failed'); } }]) {
   test('plugin always closes its voice session after native module loading or cleanup fails', async () => {
     const bundle = fs.readFileSync(path.join(__dirname, '../CustomVoice.plugin.js'), 'utf8');
-    const context = vm.createContext({ nativeCaptureModule, customVoiceLogger: undefined, customVoiceLog() {}, module: { exports: {} }, console: { warn() {} },
+    const context = vm.createContext({ nativeCaptureModule, css: '', customVoiceFeatureCss: '', customVoiceDiscordCss: '', customVoiceLogger: undefined, customVoiceLog() {}, module: { exports: {} }, console: { warn() {} },
       disposeSettingsDialogs() {}, BdApi: { DOM: { removeStyle() {} }, Patcher: { unpatchAll() {} } }
     });
     vm.runInContext(bundle.slice(bundle.lastIndexOf('// src/index.ts')), context);

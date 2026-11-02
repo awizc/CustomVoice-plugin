@@ -12,10 +12,17 @@ if ($LASTEXITCODE -ne 0) { throw 'Native capture build failed' }
 $builtNativeVersion = [regex]::Match([IO.File]::ReadAllText((Join-Path $PSScriptRoot 'NativeUpdate.cs')), 'CurrentVersion\s*=\s*"(\d+\.\d+\.\d+)"').Groups[1].Value
 if (-not $builtNativeVersion) { throw 'Compiled native version metadata is missing' }
 [IO.File]::WriteAllText((Join-Path $outputDirectory 'native-version.json'), (ConvertTo-Json @{ version = $builtNativeVersion }), [Text.UTF8Encoding]::new($false))
-foreach ($file in @('capture.js', 'host-main.cjs', 'host-preload.cjs', 'audio-main.cjs', 'github-main.cjs', 'Install.cmd', 'README.txt')) {
+foreach ($file in @('capture.js', 'host-main.cjs', 'host-preload.cjs', 'audio-main.cjs', 'github-main.cjs', 'window-sources-main.cjs', 'Install.cmd', 'README.txt')) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination $outputDirectory
 }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'THIRD-PARTY-NOTICES.txt') -Destination $outputDirectory
+$hookDirectory = Join-Path $PSScriptRoot 'game-hook'
+foreach ($entry in (Get-Content -LiteralPath (Join-Path $hookDirectory 'checksums.json') -Raw | ConvertFrom-Json)) {
+    if ((Get-FileHash -LiteralPath (Join-Path $hookDirectory $entry.name)).Hash -ne $entry.sha256) { throw ('Game capture component checksum mismatch: ' + $entry.name) }
+}
+$hookTarget = Join-Path $outputDirectory 'game-hook'
+New-Item -ItemType Directory -Path $hookTarget -Force | Out-Null
+Get-ChildItem -LiteralPath $hookDirectory -File | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $hookTarget -Force }
 $licenseDirectory = Join-Path $outputDirectory 'licenses'
 New-Item -ItemType Directory -Path $licenseDirectory -Force | Out-Null
 Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'licenses') -File | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $licenseDirectory -Force }

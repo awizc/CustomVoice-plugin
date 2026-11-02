@@ -1,8 +1,8 @@
 /**
  * @name CustomVoice
  * @author CustomVoice contributors
- * @version 1.1.6
- * @nativeVersion 1.1.6
+ * @version 1.1.16
+ * @nativeVersion 1.1.12
  * @description Independent LiveKit voice channels inside Discord.
  * @source https://github.com/awizc/CustomVoice-plugin
  * @updateUrl https://api.github.com/repos/awizc/CustomVoice-plugin/contents/CustomVoice.plugin.js?ref=main
@@ -32227,10 +32227,11 @@ function createNativeCaptureModule() {
   const sessions = new Set();
   // Preserve the requested profile, regulating work offered to a busy encoder.
   function createCadenceController(target) {
-    let rate = target, overloaded = 0, healthy = 0, previousTime;
+    let rate = target, overloaded = 0, healthy = 0, previousTime, warmup = 0;
     return {
       get fps() { return rate; },
-      reset(next) { target = rate = next; overloaded = healthy = 0; previousTime = undefined; },
+      reset(next) { target = rate = next; overloaded = healthy = warmup = 0; previousTime = undefined; },
+      recover() { rate = target; overloaded = healthy = 0; warmup = 2; },
       update(stats, native = {}) {
         const timestamp = stats?.sample?.timestamp;
         if (Number.isFinite(timestamp)) {
@@ -32238,7 +32239,11 @@ function createNativeCaptureModule() {
           previousTime = timestamp;
         }
         const sent = stats?.encodeFps, cost = stats?.processingMs;
+        // Missing game frames and the low-rate placeholder are source waits,
+        // not encoder overload. Discard feedback spanning a capture restart.
+        if (native.sourceAvailable === false) { rate = target; overloaded = healthy = 0; warmup = 2; return rate; }
         if (!Number.isFinite(sent) || sent < 0) return rate;
+        if (warmup > 0) { warmup--; return rate; }
         const offered = Math.min(rate, Number.isFinite(stats.captureFps) ? Math.max(stats.captureFps, rate * 0.5) : rate);
         const busy = native.backpressureFps > rate * 0.1 || native.preImportDropFps > rate * 0.1;
         const stalled = sent === 0 && stats.captureFps > 1;
@@ -32250,7 +32255,7 @@ function createNativeCaptureModule() {
         const captureReady = !Number.isFinite(native.outputWorkMs) || native.outputWorkMs < 750 / rate;
         healthy = !slow && !busy && captureReady && sent >= rate * 0.95 && (hardware || Number.isFinite(cost) && cost < 750 / rate) ? healthy + 1 : 0;
         if (overloaded >= 2) {
-          const encoderCapacity = !slowEncoder ? rate : stalled ? rate * 0.5 : Math.min(sent * 1.1, !hardware && Number.isFinite(cost) && cost > 0 ? 900 / cost : rate);
+          const encoderCapacity = !slowEncoder ? rate : sent === 0 ? rate * 0.5 : Math.min(sent * 1.1, !hardware && Number.isFinite(cost) && cost > 0 ? 900 / cost : rate);
           // Unlike parallel hardware encoding, this native worker is serial:
           // reserve some time when conversion/submission itself is the bottleneck.
           const capacity = Math.min(encoderCapacity, slowCapture ? 900 / native.outputWorkMs : rate);
@@ -32284,12 +32289,54 @@ function createNativeCaptureModule() {
     };
   }
   function available() { return globalThis.CustomVoiceNative?.protocol === 2 && globalThis.CustomVoiceNative.available && typeof MediaStreamTrackGenerator === 'function'; }
+  async function listSources(discordCapture, signal) {
+    if (signal.aborted) throw new DOMException('Capture cancelled', 'AbortError');
+    const native = globalThis.CustomVoiceNative;
+    const hasNativeList = typeof native?.listWindowSources === 'function';
+    const [desktop, windows] = await Promise.allSettled([
+      Promise.resolve().then(() => discordCapture.getDesktopCaptureSources({
+        types: ['screen', 'window'], thumbnailSize: { width: 640, height: 360 }, fetchWindowIcons: true
+      })).then(sources => { if (!Array.isArray(sources)) throw Error('화면 목록 응답이 올바르지 않습니다.'); return sources; }),
+      Promise.resolve().then(() => hasNativeList ? native.listWindowSources() : [])
+        .then(sources => { if (!Array.isArray(sources)) throw Error('창 목록 응답이 올바르지 않습니다.'); return sources; })
+    ]);
+    if (signal.aborted) throw new DOMException('Capture cancelled', 'AbortError');
+    const result = [], keys = new Map();
+    function add(source, fromNative) {
+      if (typeof source?.id !== 'string' || typeof source.name !== 'string' || !source.name.trim()) return;
+      const match = /^(screen|window):(\d+):(\d+)$/.exec(source.id);
+      if (!match || fromNative && match[1] !== 'window' || match[1] === 'window' && BigInt(match[2]) === 0n) return;
+      const key = match[1] + ':' + BigInt(match[2]);
+      if (keys.has(key)) {
+        if (fromNative) result[keys.get(key)].minimized = source.minimized === true;
+        return;
+      }
+      keys.set(key, result.length);
+      result.push(fromNative
+        ? { id: source.id, name: source.name, minimized: source.minimized === true, nativeOnly: true }
+        : { ...source });
+    }
+    if (desktop.status === 'fulfilled') for (const source of desktop.value) add(source, false);
+    if (windows.status === 'fulfilled') for (const source of windows.value) add(source, true);
+    if (typeof customVoiceLog === 'function') {
+      for (const [name, outcome] of [['Discord', desktop], ['Windows', windows]])
+        if (outcome.status === 'rejected') customVoiceLog('warn', '[CustomVoice] '+name+' source list failed', outcome.reason);
+      customVoiceLog('info', '[CustomVoice] Share source list', {
+        discord: desktop.status === 'fulfilled' ? desktop.value.length : 0,
+        native: windows.status === 'fulfilled' ? windows.value.length : 0,
+        addedWindows: result.filter(source => source.nativeOnly).length, total: result.length, nativeListAvailable: hasNativeList
+      });
+    }
+    if (desktop.status === 'rejected' && !result.length) throw desktop.reason;
+    return result;
+  }
   async function start(sourceId, fps, quality, signal, showBorder = true) {
     if (signal.aborted) throw new DOMException('Capture cancelled', 'AbortError');
     const bridge = globalThis.CustomVoiceNative;
     if (bridge?.protocol !== 2) throw new Error('네이티브 시작 연결이 로드되지 않았습니다. 설치 상태를 확인한 뒤 Discord를 완전히 종료하고 다시 실행해 주세요.');
     if (!bridge.available) throw new Error('현재 Discord에서 네이티브 GPU 프레임 연결 API를 사용할 수 없습니다.');
     if (typeof MediaStreamTrackGenerator !== 'function') throw new Error('현재 Discord에서 생성형 비디오 트랙 API를 사용할 수 없습니다.');
+    if (sourceId.startsWith('window:') && bridge.windowCaptureAuto !== true) throw new Error('전체 화면 자동 감지와 제목 표시줄 제외에는 native 1.1.7 이상 설치 및 Discord 완전 재시작이 필요합니다.');
     const track = new MediaStreamTrackGenerator({ kind: 'video' });
     const writer = track.writable.getWriter(), originalStop = track.stop.bind(track), originalSettings = track.getSettings.bind(track);
     let info, diagnostics, lastNativeSample, closed = false, writing = false, received = false, readyResolve, readyReject;
@@ -32332,18 +32379,30 @@ function createNativeCaptureModule() {
       info = { ...info, ...state };
       if (!closed) track.dispatchEvent(new Event('customvoiceborderchange'));
     }
+    function recoverCadence() {
+      cadence.recover(); lastPaceAt = -Infinity; lastPaceRate = undefined;
+      lastNativeSample = undefined; diagnostics = undefined;
+      clearTimeout(frameTimer); frameTimer = undefined;
+      control.updateEncoderStats(); drain();
+    }
+    function sourceState(available) {
+      if (typeof available !== 'boolean' || info.sourceAvailable === available) return;
+      info = { ...info, sourceAvailable: available };
+      recoverCadence();
+      if (typeof customVoiceLog === 'function') customVoiceLog('info', '[CustomVoice] Capture source', { available, width: info.width, height: info.height, backend: info.backend });
+    }
     const control = {
-      track, backend: 'WGC-D3D11 GPU', get metadata() { return info; },
+      track, get backend() { return info?.backend === 'GAME-HOOK-D3D11' ? '게임 캡처 · GPU' : info?.backend === 'GAME-HOOK-MEMORY' ? '게임 캡처 · 호환 모드' : info?.backend === 'DXGI-D3D11' ? 'DXGI-D3D11 GPU (전체 화면)' : 'WGC-D3D11 GPU'; }, get metadata() { return info; },
       get diagnostics() {
         const time = now();
-        return { ...diagnostics, skippedRepeats, replacedFrames, preImportDropped, boundedDelivery, pacingFps: cadence.fps, nativePacing: nativePacing(), encoderPressured: cadence.fps < (info?.fps ?? fps) - 0.5,
+        return { ...diagnostics, sourceAvailable: info?.sourceAvailable, holdingFrame: info?.holdingFrame, skippedRepeats, replacedFrames, preImportDropped, boundedDelivery, pacingFps: cadence.fps, nativePacing: nativePacing(), encoderPressured: cadence.fps < (info?.fps ?? fps) - 0.5,
           ...handoffWindow.snapshot(time), handoffAgeMs: !closed && Number.isFinite(lastDelivered) ? Math.max(0, time - lastDelivered) : undefined,
           writerPendingMs: !closed && writing ? Math.max(0, time - lastWriteStarted) : 0,
           nativeSampleAgeMs: Number.isFinite(nativeSampleAt) ? Math.max(0, time - nativeSampleAt) : undefined };
       },
       updateEncoderStats(stats) {
         if (closed) return;
-        const before = cadence.fps, rate = cadence.update(stats, now() - nativeSampleAt <= 6000 ? diagnostics : undefined);
+        const before = cadence.fps, rate = cadence.update(stats, { ...(now() - nativeSampleAt <= 6000 ? diagnostics : undefined), sourceAvailable: info?.sourceAvailable });
         if (nativePacing() && (lastPaceRate !== rate || now() - lastPaceAt >= 3000)) {
           try { bridge.pace(info.session, rate); lastPaceRate = rate; lastPaceAt = now(); }
           catch (error) {
@@ -32387,16 +32446,27 @@ function createNativeCaptureModule() {
       const data = event.data;
       const origin = location.protocol === 'file:' ? 'null' : location.origin;
       if (event.source !== window || event.origin !== origin || !info || data?.session !== info.session) return;
+      if (typeof data.holdingFrame === 'boolean') info = { ...info, holdingFrame: data.holdingFrame };
       if (data.type === 'customvoice-native-status-v2') {
         if (data.event === 'error') fail(new Error(data.message));
-        else if (data.event === 'resized') info = { ...info, ...data };
+        else if (data.event === 'resized') { info = { ...info, ...data }; recoverCadence(); }
+        else if (data.event === 'source-state') sourceState(data.sourceAvailable);
+        else if (data.event === 'capture-mode') {
+          info = { ...info, ...data };
+          recoverCadence();
+          if (typeof customVoiceLog === 'function') customVoiceLog('info', '[CustomVoice] Automatic capture mode', { backend: data.backend, windowClientOnly: info.windowClientOnly });
+        } else if (data.event === 'capture-warning') {
+          if (typeof customVoiceLog === 'function') customVoiceLog('warn', '[CustomVoice] Fullscreen capture', data.message);
+          globalThis.BdApi?.UI?.showToast?.(data.message, { type: 'warning' });
+        }
         else if (data.event === 'stats') {
+          sourceState(data.sourceAvailable);
           nativeSampleAt = now();
           if (lastNativeSample && data.elapsedMs > lastNativeSample.elapsedMs) {
             const seconds = (data.elapsedMs - lastNativeSample.elapsedMs) / 1000;
             const rate = key => Number.isFinite(data[key]) && Number.isFinite(lastNativeSample[key]) && data[key] >= lastNativeSample[key] ? (data[key] - lastNativeSample[key]) / seconds : undefined;
             const attempts = rate('outputAttempts'), work = rate('outputWorkUs');
-            diagnostics = { sourceFps: rate('captured'), outputFps: rate('frames'), repeatedFps: rate('repeated'), backpressureFps: rate('dropped'), conversionFps: rate('conversions'), gpuContentionsFps: rate('gpuContentions'), nativePacingFps: data.pacingFps,
+            diagnostics = { sourceFps: rate('captured'), outputFps: rate('frames'), repeatedFps: rate('repeated'), backpressureFps: rate('dropped'), conversionFps: rate('conversions'), gpuContentionsFps: rate('gpuContentions'), nativePacingFps: data.pacingFps, sourceAgeMs: data.sourceAgeMs, captureMode: data.backend,
               preImportDropFps: Math.max(0, preImportDropped - previousImportDropped) / seconds,
               outputWorkMs: attempts > 0 && Number.isFinite(work) ? work / attempts / 1000 : undefined, outputOverrunFps: rate('outputOverruns') };
           }
@@ -32406,6 +32476,7 @@ function createNativeCaptureModule() {
         return;
       }
       if (data.type !== 'customvoice-native-frame-v2' || !data.frame) return;
+      sourceState(data.sourceAvailable);
       if (Number.isSafeInteger(data.preImportDropped)) preImportDropped = Math.max(preImportDropped, data.preImportDropped);
       const frame = data.frame;
       if (closed) { frame.close(); return; }
@@ -32447,6 +32518,7 @@ function createNativeCaptureModule() {
     window.addEventListener('message', message); signal.addEventListener('abort', abort, { once: true });
     void (async () => {
       info = await bridge.start(sourceId, fps, quality);
+      if (sourceId.startsWith('window:') && info.windowClientOnly !== true) throw new Error('native 파일의 버전이 섞여 있습니다. 최신 전체 ZIP을 다시 설치해 주세요.');
       if (closed || signal.aborted) { await bridge.stop(info.session); abort(); }
       else {
         await bridge.activate(info.session, boundedDelivery);
@@ -32460,14 +32532,14 @@ function createNativeCaptureModule() {
     return ready;
   }
   function stopAll() { for (const session of [...sessions]) session.stop(); }
-  return { available, start, stopAll };
+  return { available, start, stopAll, listSources };
   
 }
 // </CustomVoiceNativeRenderer>
 var nativeCaptureModule;
 var processAudioModule;
 async function tryNativeDesktopCapture(sourceId, options, signal) {
-  if (options.resolution.frameRate <= 60 && options.showBorder !== false) return;
+  if (!sourceId.startsWith("window:") && options.resolution.frameRate <= 60 && options.showBorder !== false) return;
   try {
     if (require("process").platform !== "win32") return;
     if (!nativeCaptureModule) nativeCaptureModule = createNativeCaptureModule();
@@ -32476,6 +32548,7 @@ async function tryNativeDesktopCapture(sourceId, options, signal) {
     return control;
   } catch (error62) {
     if (signal.aborted || error62?.name === "AbortError") throw error62;
+    if (sourceId.startsWith("window:")) throw error62;
     customVoiceLog("warn", "[CustomVoice] Native GPU capture unavailable; using Chromium capture", error62);
     globalThis.BdApi?.UI?.showToast(`네이티브 캡처를 시작하지 못해 기본 캡처로 전환합니다. ${error62.message}`, { type: "warning" });
   }
@@ -32520,6 +32593,11 @@ async function captureDesktopVideo(sourceId, frameRate, signal) {
     }
   }
 }
+var shareAudioDescriptions = [
+  "앱·게임 창 공유: 선택한 앱과 자식 프로세스의 소리를 보냅니다. 같은 프로세스에서 열린 다른 창·탭의 소리도 포함될 수 있습니다.",
+  "전체 화면 공유: 다른 앱과 알림을 포함한 시스템 소리를 보냅니다.",
+  "끄면 앱 소리와 시스템 소리 모두 방송에 보내지 않습니다. 마이크 음소거는 별도입니다."
+];
 var nextPickerId = 0;
 function imageData(value) {
   try {
@@ -32529,7 +32607,7 @@ function imageData(value) {
     return void 0;
   }
 }
-function selectDesktopSource(sources, signal, options) {
+function selectDesktopSource(sources, signal, options, refreshSources) {
   return new Promise((resolve, reject) => {
     if (signal.aborted) {
       reject(cancelled());
@@ -32567,7 +32645,9 @@ function selectDesktopSource(sources, signal, options) {
     grid.className = "cv-share-grid";
     grid.setAttribute("role", "tabpanel");
     const tabButtons = [];
+    let selectedType = sources.some(source => source.id.startsWith('window:')) ? 'window' : 'screen';
     const render = (type) => {
+      selectedType = type;
       grid.replaceChildren();
       for (const tab of tabButtons) {
         const active = tab.dataset.type === type;
@@ -32606,7 +32686,7 @@ function selectDesktopSource(sources, signal, options) {
         } else {
           const placeholder = document.createElement("span");
           placeholder.className = "cv-share-placeholder";
-          placeholder.textContent = "\uBBF8\uB9AC\uBCF4\uAE30 \uC5C6\uC74C";
+          placeholder.textContent = source.minimized ? "최소화된 창 · 공유 후 게임으로 돌아가세요" : "\uBBF8\uB9AC\uBCF4\uAE30 \uC5C6\uC74C";
           preview.append(placeholder);
         }
         const caption = document.createElement("div");
@@ -32667,6 +32747,30 @@ function selectDesktopSource(sources, signal, options) {
       tabs.append(tab);
     }
     dialog.append(tabs, grid);
+    if (typeof refreshSources === 'function') {
+      const refreshRow = document.createElement('div');
+      refreshRow.style.cssText = 'display:flex;align-items:center;gap:12px;flex-shrink:0;margin-top:16px';
+      const refresh = document.createElement('button');
+      refresh.type = 'button'; refresh.textContent = '목록 새로고침';
+      refresh.style.cssText = 'padding:8px 12px;border-radius:6px;background:var(--button-secondary-background,#4e5058);flex-shrink:0';
+      const status = document.createElement('span');
+      status.setAttribute('role', 'status');
+      status.style.cssText = 'font-size:12px;color:var(--text-muted,#b5bac1)';
+      status.textContent = '찾는 게임이 없다면 실행 후 새로고침해 주세요.';
+      refresh.onclick = async () => {
+        if (refresh.disabled || settled) return;
+        refresh.disabled = true; status.textContent = '창 목록을 확인하고 있습니다…';
+        try {
+          const updated = await refreshSources();
+          if (settled) return;
+          sources = updated; render(selectedType);
+          status.textContent = '목록을 새로고침했습니다.';
+        } catch (error) {
+          if (!settled) status.textContent = error.message || '목록을 가져오지 못했습니다. 다시 시도해 주세요.';
+        } finally { if (!settled) refresh.disabled = false; }
+      };
+      refreshRow.append(refresh, status); dialog.append(refreshRow);
+    }
     if (options) {
       const footer = document.createElement("div");
       footer.className = "cv-share-footer";
@@ -32704,12 +32808,24 @@ function selectDesktopSource(sources, signal, options) {
       const audio = document.createElement("input");
       audio.type = "checkbox";
       audio.checked = options.audio;
-      audio.setAttribute("aria-label", "\uC18C\uB9AC \uACF5\uC720");
+      audio.setAttribute("aria-label", "공유 대상 소리");
       audio.onchange = () => {
         options.audio = audio.checked;
       };
-      audioLabel.append(audio, " 소리 공유 (창: 해당 앱 / 화면: 시스템)");
+      audioLabel.append(audio, " 공유 대상 소리");
       footer.append(detail, quality, fps, audioLabel);
+      const audioHelp = document.createElement("div");
+      audioHelp.id = `${grid.id}-audio-help`;
+      audio.setAttribute("aria-describedby", audioHelp.id);
+      for (const description of shareAudioDescriptions) {
+        const line = document.createElement("small");
+        line.textContent = description;
+        audioHelp.append(line);
+      }
+      footer.append(audioHelp);
+      const captureHelp = document.createElement("small");
+      captureHelp.textContent = "앱 공유는 창 제목·테두리를 제외합니다. 활성화된 전체 화면·보더리스 창은 해당 모니터 영상으로 자동 전환하며 알림·오버레이가 포함될 수 있습니다. 소리는 선택한 앱만 공유합니다.";
+      footer.append(captureHelp);
       dialog.append(footer);
     }
     render(
@@ -32769,20 +32885,18 @@ function discordScreenCapture(pick2 = selectDesktopSource) {
         "\uC774 Discord \uBC84\uC804\uC5D0\uC11C \uD654\uBA74 \uCEA1\uCC98 API\uB97C \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. Discord\uC640 BetterDiscord\uB97C \uC5C5\uB370\uC774\uD2B8\uD574 \uC8FC\uC138\uC694."
       );
     }
-    const sources = await bridge.getDesktopCaptureSources({
-      types: ["screen", "window"],
-      thumbnailSize: { width: 640, height: 360 },
-      fetchWindowIcons: true
-    });
-    if (signal.aborted) throw cancelled();
-    const valid = sources.filter(
-      (s) => /^(screen|window):/.test(s.id) && typeof s.name === "string"
-    );
+    nativeCaptureModule ??= createNativeCaptureModule();
+    const valid = await nativeCaptureModule.listSources(bridge, signal);
+    const refreshSources = async () => {
+      const updated = await nativeCaptureModule.listSources(bridge, signal);
+      valid.splice(0, valid.length, ...updated);
+      return valid;
+    };
     if (!valid.length)
       throw new Error(
         "\uACF5\uC720\uD560 \uD654\uBA74\uC774\uB098 \uCC3D\uC744 \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uC6B4\uC601\uCCB4\uC81C\uC758 \uD654\uBA74 \uB179\uD654 \uAD8C\uD55C\uC744 \uD655\uC778\uD574 \uC8FC\uC138\uC694."
       );
-    const id2 = await pick2(valid, signal, options);
+    const id2 = await pick2(valid, signal, options, refreshSources);
     if (signal.aborted) throw cancelled();
     if (!valid.some((s) => s.id === id2))
       throw new Error("\uC120\uD0DD\uD55C \uD654\uBA74\uC744 \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
@@ -32828,9 +32942,12 @@ function discordScreenCapture(pick2 = selectDesktopSource) {
       processAudioModule ??= createProcessAudioModule();
       const raw = await processAudioModule.start(audioSource, signal);
       if (signal.aborted || selectedSource !== audioSource) { raw.stop(); throw cancelled(); }
-      const track = new LocalAudioTrack(raw, void 0, true);
-      track.source = Track.Source.ScreenShareAudio;
-      return [track];
+      try {
+        raw.contentHint = "music";
+        const track = new LocalAudioTrack(raw, void 0, true);
+        track.source = Track.Source.ScreenShareAudio;
+        return [track];
+      } catch (error) { raw.stop(); throw error; }
     }
     if (!selectedSource) throw new Error("\uC774 \uD658\uACBD\uC5D0\uC11C\uB294 \uC18C\uB9AC\uB97C \uCD94\uAC00\uD558\uB824\uBA74 \uD654\uBA74 \uACF5\uC720\uB97C \uB2E4\uC2DC \uC2DC\uC791\uD574\uC57C \uD569\uB2C8\uB2E4.");
     if (!/^screen:[^:]+:\d+$/.test(selectedSource)) throw new Error("공유 대상 종류를 확인할 수 없어 시스템 소리를 캡처하지 않았습니다.");
@@ -32854,7 +32971,8 @@ function discordScreenCapture(pick2 = selectDesktopSource) {
       const audio = stream.getAudioTracks();
       if (!audio.length) throw new Error("\uACF5\uC720 \uB300\uC0C1\uC5D0\uC11C \uC18C\uB9AC\uB97C \uCEA1\uCC98\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
       return audio.map((source) => {
-        const track = new LocalAudioTrack(source, void 0, false);
+        source.contentHint = "music";
+        const track = new LocalAudioTrack(source, void 0, true);
         track.source = Track.Source.ScreenShareAudio;
         return track;
       });
@@ -33210,7 +33328,8 @@ function isAudioDeviceError(error62) {
 }
 
 // src/vendor/sdk/media-options.ts
-var mediaRoomOptions = { adaptiveStream: false, dynacast: false };
+var screenAudioPublishOptions = { source: Track.Source.ScreenShareAudio, audioPreset: { maxBitrate: 128000 }, forceStereo: true, dtx: false, red: true };
+var mediaRoomOptions = { adaptiveStream: false, dynacast: false, webAudioMix: true };
 
 // src/services/screen-codec.ts
 async function selectScreenCodec(width, height, fps, bitrate, track, allowedCodecs) {
@@ -53099,6 +53218,7 @@ var VoiceClient = class {
     });
   }
   watching = /* @__PURE__ */ new Set();
+  screenRecoveries = /* @__PURE__ */ new Map();
   audioBitrate = 64e3;
   credentials;
   socket;
@@ -53567,7 +53687,7 @@ var VoiceClient = class {
       for (const track of tracks) {
         if (captureAbort.signal.aborted || this.room !== room || track.mediaStreamTrack.readyState === "ended")
           throw new Error("Screen capture stopped");
-        await room.localParticipant.publishTrack(track, track.kind === Track.Kind.Video ? profile.publish : void 0);
+        await room.localParticipant.publishTrack(track, track.kind === Track.Kind.Video ? profile.publish : screenAudioPublishOptions);
         if (track.kind === Track.Kind.Video) {
           const sender = track.sender;
           if (!sender) throw new Error("\uD654\uBA74 \uC1A1\uCD9C \uC778\uCF54\uB354\uAC00 \uC900\uBE44\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.");
@@ -53575,7 +53695,7 @@ var VoiceClient = class {
         }
       }
       if (captureAbort.signal.aborted || this.room !== room || video.mediaStreamTrack.readyState === "ended") throw new DOMException("Screen capture stopped", "AbortError");
-      this.activeShare = { quality: selectedQuality, fps: selectedFps };
+      this.activeShare = { quality: selectedQuality, fps: selectedFps, audioRequested: captureOptions.audio };
       reportScreenCaptureLimit(profile);
     } catch (error62) {
       for (const track of tracks) try { track.mediaStreamTrack?.stop(); } catch {}
@@ -53705,7 +53825,7 @@ var VoiceClient = class {
       await this.sendScreenSignal("SCREEN_SHARE_START", { quality, hasAudio: true }, void 0, currentShare);
       for (const track of tracks) {
         if (!currentShare()) throw new DOMException("방송이 종료되었습니다.", "AbortError");
-        await room.localParticipant.publishTrack(track);
+        await room.localParticipant.publishTrack(track, screenAudioPublishOptions);
       }
       if (!currentShare()) throw new DOMException("방송이 종료되었습니다.", "AbortError");
     } catch (error62) {
@@ -53733,7 +53853,7 @@ var VoiceClient = class {
       await configureScreenSender(track, profile);
       if (this.room !== room || track.mediaStreamTrack.readyState === "ended") throw new DOMException("\uBC29\uC1A1\uC774 \uC885\uB8CC\uB418\uC5C8\uC2B5\uB2C8\uB2E4.", "AbortError");
       publication.options = { ...publication.options, ...profile.publish };
-      this.activeShare = { quality, fps };
+      this.activeShare = { ...this.activeShare, quality, fps };
       reportScreenCaptureLimit(profile);
     } catch (error62) {
       if (this.room === room && capture.readyState !== "ended") {
@@ -53761,6 +53881,8 @@ var VoiceClient = class {
     }
   }
   async releaseMedia() {
+    for (const recovery of this.screenRecoveries.values()) recovery.cancel?.();
+    this.screenRecoveries.clear();
     this.activeShare = void 0;
     this.pendingScreenAudio = void 0;
     this.cancelScreenCapture();
@@ -53865,12 +53987,52 @@ var VoiceClient = class {
   }
   watchScreen(identity2, watch = true) {
     if (watch) this.watching.add(identity2);
-    else this.watching.delete(identity2);
+    else {
+      this.watching.delete(identity2);
+      this.screenRecoveries.get(identity2)?.cancel?.();
+      this.screenRecoveries.delete(identity2);
+    }
     const participant = this.room?.remoteParticipants.get(identity2);
     if (!participant) throw new Error("Participant not found");
     for (const publication of participant.trackPublications.values())
       if (publication.source === Track.Source.ScreenShare || publication.source === Track.Source.ScreenShareAudio)
         publication.setSubscribed(watch);
+  }
+  recoverScreenSubscription(identity, sid) {
+    const room = this.room, participant = room?.remoteParticipants.get(identity);
+    const publication = participant?.getTrackPublication(Track.Source.ScreenShare);
+    const current = () => this.room === room && this.watching.has(identity) && room?.remoteParticipants.get(identity) === participant && participant?.getTrackPublication(Track.Source.ScreenShare) === publication && publication?.trackSid === sid;
+    if (!publication || !current()) return Promise.resolve(false);
+    const prior = this.screenRecoveries.get(identity), now = Date.now();
+    const recentAttempts = prior?.room === room && prior.sid === sid ? prior.attemptTimes.filter(time => now - time < 60000) : [];
+    if (prior?.room === room && prior.sid === sid) {
+      if (prior.work) return prior.work;
+      if (now - prior.lastAttempt < 15000 || recentAttempts.length >= 3) return Promise.resolve(false);
+    } else prior?.cancel?.();
+    const entry = { room, sid, attemptTimes: [...recentAttempts, now], attempts: recentAttempts.length + 1, lastAttempt: now };
+    this.screenRecoveries.set(identity, entry);
+    entry.work = new Promise((resolve) => {
+      let finished = false, timer;
+      const cleanup = () => { clearTimeout(timer); room.off(RoomEvent.TrackUnsubscribed, unsubscribed); };
+      const finish = (restore) => {
+        if (finished) return;
+        finished = true; cleanup();
+        if (!restore || !current()) { resolve(false); return; }
+        try { publication.setSubscribed(true); resolve(true); }
+        catch (error) { customVoiceLog('warn', '[CustomVoice] Video resubscription failed', error); resolve(false); }
+      };
+      const unsubscribed = (_track, removed, peer) => { if (removed === publication && peer === participant) finish(true); };
+      entry.cancel = () => finish(false);
+      room.on(RoomEvent.TrackUnsubscribed, unsubscribed);
+      // Wait for the old receiver to detach so the server cannot coalesce the
+      // OFF/ON requests into a no-op. A lost event still has a bounded fallback.
+      timer = setTimeout(() => finish(true), 1500);
+      try {
+        customVoiceLog('warn', '[CustomVoice] Refreshing remote video subscription', { trackSid: sid, attempt: entry.attempts });
+        publication.setSubscribed(false);
+      } catch (error) { customVoiceLog('warn', '[CustomVoice] Video unsubscribe failed', error); finish(true); }
+    }).finally(() => { entry.work = undefined; entry.cancel = undefined; });
+    return entry.work;
   }
   async connectionStats() {
     const reports = [];
@@ -54035,7 +54197,7 @@ var MediaController = class {
     document.body.append(element);
     this.audio.set(track, { element, identity: identity2, source });
     this.updateOutput();
-    void this.playAudio([element]).catch(this.report);
+    void this.playAudio([element], true).catch(this.report);
   }
   removeAudio(track) {
     const item = this.audio.get(track);
@@ -54048,12 +54210,13 @@ var MediaController = class {
   removeScreenAudio(identity) {
     for (const [track, item] of this.audio) if (item.identity === identity && item.source === Track.Source.ScreenShareAudio) this.removeAudio(track);
   }
+  syncScreenAudio(identity) {
+    if (!this.store.get().watching.includes(identity)) { this.removeScreenAudio(identity); return; }
+    const publication = this.room?.remoteParticipants.get(identity)?.getTrackPublication(Track.Source.ScreenShareAudio);
+    if (publication?.track) this.addAudio(publication.track, identity, publication.source);
+  }
   volume(identity2, value) {
-    this.volumes.set(identity2, Math.max(0, Math.min(2, value)));
-    const p = this.room?.remoteParticipants.get(identity2);
-    p?.setVolume(
-      this.store.get().deafened ? 0 : this.volumes.get(identity2) ?? 1
-    );
+    this.volumes.set(identity2, Number.isFinite(value) ? Math.max(0, Math.min(2, value)) : 1);
     this.updateOutput();
   }
   getVolume(identity2) {
@@ -54074,18 +54237,18 @@ var MediaController = class {
     return volume;
   }
   updateOutput() {
-    for (const { element, identity: identity2, source } of this.audio.values()) {
-      element.muted = this.store.get().deafened;
-      element.volume = Math.min(1, source === Track.Source.ScreenShareAudio ? this.getStreamVolume(identity2) : this.getVolume(identity2));
+    for (const [track, { element, identity: identity2, source }] of this.audio) {
+      // LiveKit's Web Audio graph provides amplification; its backing element
+      // must stay silent or the same track plays twice with different delays.
+      element.muted = !!track.audioContext || this.store.get().deafened;
+      element.volume = track.audioContext ? 0 : Math.min(1, source === Track.Source.ScreenShareAudio ? this.getStreamVolume(identity2) : this.getVolume(identity2));
     }
     for (const p of this.room?.remoteParticipants.values() ?? []) {
-      p.setVolume(
-        this.store.get().deafened ? 0 : this.getStreamVolume(p.identity),
-        Track.Source.ScreenShareAudio
-      );
-      p.setVolume(
-        this.store.get().deafened ? 0 : this.volumes.get(p.identity) ?? 1
-      );
+      for (const source of [Track.Source.ScreenShareAudio, Track.Source.Microphone]) {
+        const track = p.getTrackPublication(source)?.track;
+        const volume = this.store.get().deafened ? 0 : source === Track.Source.ScreenShareAudio ? this.getStreamVolume(p.identity) : this.getVolume(p.identity);
+        p.setVolume(Math.min(track?.audioContext ? 2 : 1, volume), source);
+      }
     }
   }
   async outputReady() {
@@ -54126,11 +54289,15 @@ var MediaController = class {
   }
   async playAudio(elements, resumeRoom = false) {
     const room = this.room;
+    // Request playback while the initiating click still has user activation.
+    const started = resumeRoom && room && !this.store.get().deafened ? Promise.resolve(room.startAudio()) : Promise.resolve();
+    started.catch(() => {});
     if (!await this.outputReady() || this.room !== room) return;
     try {
-      if (resumeRoom) await room?.startAudio();
+      await started;
       for (const element of elements) {
         if (this.room !== room) return;
+        if (![...this.audio.values()].some(item => item.element === element)) continue;
         await element.play();
       }
       if (this.room === room) this.store.set({ outputUnavailable: void 0 });
@@ -54328,18 +54495,18 @@ function createProcessAudioModule(){
     if(!bridge?.audioStart)throw Error('앱별 소리 캡처용 native가 없습니다. 송출자 PC에 최신 전체 ZIP을 설치한 뒤 Discord를 완전히 재시작해 주세요. 시스템 소리로 대체하지 않습니다.');
     if(signal.aborted)throw new DOMException('Capture cancelled','AbortError');
     const context=new AudioContext({sampleRate:48000,latencyHint:'interactive'});
-    let info,node,destination,track,silentSink,closed=false,timer,readyTimer,readyResolve,readyReject;
+    let info,node,destination,track,silentSink,closed=false,timer,readyTimer,recoveryTimer,resuming,readyResolve,readyReject;
     const ready=new Promise((resolve,reject)=>{readyResolve=resolve;readyReject=reject;});ready.catch(()=>{});
     const origin=location.protocol==='file:'?'null':location.origin;
     const stop=()=>{
-      if(closed)return;closed=true;clearTimeout(timer);clearTimeout(readyTimer);readyReject(new DOMException('Capture cancelled','AbortError'));
+      if(closed)return;closed=true;clearTimeout(timer);clearTimeout(readyTimer);clearTimeout(recoveryTimer);readyReject(new DOMException('Capture cancelled','AbortError'));
       signal.removeEventListener('abort',stop);window.removeEventListener('message',message);context.onstatechange=null;
       if(track){track.enabled=false;MediaStreamTrack.prototype.stop.call(track);}
       if(node){node.onprocessorerror=null;node.port.onmessage=null;node.disconnect();node.port.close();}
-      silentSink?.disconnect();void context.close().catch(()=>{});
+      destination?.disconnect();silentSink?.disconnect();void context.close().catch(()=>{});
       if(info)void bridge.audioStop(info.session).catch(()=>{});sessions.delete(stop);
     };
-    const fail=error=>{log('warn','failed',{message:error.message});readyReject(error);stop();track?.dispatchEvent(new Event('ended'));globalThis.BdApi?.UI?.showToast?.(error.message,{type:'warning'});};
+    const fail=error=>{if(closed)return;log('warn','failed',{message:error.message});readyReject(error);stop();track?.dispatchEvent(new Event('ended'));globalThis.BdApi?.UI?.showToast?.(error.message,{type:'warning'});};
     function message(event){
       const data=event.data;
       if(event.source!==window||event.origin!==origin||!info||data?.session!==info.session||closed)return;
@@ -54381,7 +54548,14 @@ function createProcessAudioModule(){
       info=await bridge.audioStart(source);
       if(closed){await bridge.audioStop(info.session);throw new DOMException('Capture cancelled','AbortError');}
       if(info.sampleRate!==48000||info.channels!==2)throw Error('앱별 오디오 캡처 형식을 지원하지 않습니다.');
-      context.onstatechange=()=>{if(!closed&&context.state!=='running')log('warn','context',{state:context.state});};
+      context.onstatechange=()=>{
+        if(closed||context.state==='running')return;
+        log('warn','context',{state:context.state});
+        if(context.state==='closed'){fail(Error('앱 소리 처리 연결이 종료되었습니다. 공유 대상 소리를 다시 켜 주세요.'));return;}
+        if(resuming)return;
+        recoveryTimer=setTimeout(()=>{if(context.state!=='running')fail(Error('앱 소리 처리가 일시 중지되었습니다. 공유 대상 소리를 다시 켜 주세요.'));},5000);
+        resuming=context.resume().then(()=>{if(context.state==='running')clearTimeout(recoveryTimer);}).catch(fail).finally(()=>{resuming=undefined;});
+      };
       await bridge.audioActivate(info.session,2);
       if(closed)throw new DOMException('Capture cancelled','AbortError');
       log('info','started',{processId:info.processId,windowProcessId:info.windowProcessId,scope:info.scope??'process-tree',sampleRate:info.sampleRate,nativeVersion:bridge.version});
@@ -54391,12 +54565,10 @@ function createProcessAudioModule(){
   return {start,stopAll(){for(const stop of [...sessions])stop();}};
 }
 
-// Bundled UI services. Notification tones are generated locally; no sound assets.
+// Bundled UI services. Use the client's own sound engine and bundled assets.
 var VoiceSounds = class {
   constructor(manager) {
-    this.manager=manager;this.previous=manager.store.get();this.channel=undefined;this.closed=false;this.last=new Map();
-    this.unlock=()=>{if(this.closed)return;try{this.context??=new AudioContext({latencyHint:'interactive'});void this.context.resume().catch(()=>{});}catch{}};
-    window.addEventListener('pointerdown',this.unlock,true);window.addEventListener('keydown',this.unlock,true);
+    this.manager=manager;this.previous=manager.store.get();this.channel=this.previous.connection==='Connected'?this.previous.sessionChannel?.id:undefined;this.closed=false;this.last=new Map();this.active=new Map();
     this.off=watchVoiceState(manager.store,['connection','sessionChannel','participants','muted','deafened','sharing','settings'],()=>this.changed());
   }
   changed() {
@@ -54412,26 +54584,45 @@ var VoiceSounds = class {
       if(old.deafened!==next.deafened)this.play(next.deafened?'deafen':'undeafen');
       else if(old.muted!==next.muted&&performance.now()-Math.max(this.last.get('deafen')??-Infinity,this.last.get('undeafen')??-Infinity)>400)this.play(next.muted?'mute':'unmute');
     }
-    if(old.sharing!==next.sharing)this.play(next.sharing?'streamStart':'streamStop');
+    if(old.sharing!==next.sharing&&connected)this.play(next.sharing?'streamStart':'streamStop');
+  }
+  resolve() {
+    if(this.engine)return;
+    // Retry discovery if Discord has not loaded its sound module yet.
+    const now=performance.now();if(this.lookupAt!==undefined&&now-this.lookupAt<5000)return;this.lookupAt=now;
+    const webpack=globalThis.BdApi?.Webpack;
+    try{this.engine=webpack?.getByKeys?.('createSound');}catch{}
+    try{this.parser??=webpack?.getModule?.(value=>{
+      if(typeof value!=='function'||typeof value.keys!=='function')return false;
+      try{const keys=value.keys();return keys.includes('./user_join.mp3')&&keys.includes('./mute.mp3');}catch{return false;}
+    },{searchExports:true});}catch{}
   }
   play(kind) {
     const settings=this.manager.store.get().settings;
     if(this.closed||!settings.soundEffects)return;
     const now=performance.now();if(now-(this.last.get(kind)??-Infinity)<180)return;this.last.set(kind,now);
-    this.unlock();const context=this.context;if(context?.state!=='running')return;
-    const patterns={join:[660,880],leave:[660,440],mute:[440,330],unmute:[440,660],deafen:[330,262,220],undeafen:[330,440,660],streamStart:[523,659,784],streamStop:[659,523,392]};
-    const volume=Math.max(0,Math.min(1,Number(settings.soundVolume)||0))*0.12;
-    if(!volume)return;
-    if(context.setSinkId&&this.output!==settings.outputDevice){this.output=settings.outputDevice;void context.setSinkId(this.output||'default').catch(()=>{});}
-    patterns[kind].forEach((frequency,index)=>{
-      const oscillator=context.createOscillator(),gain=context.createGain(),start=context.currentTime+index*0.075;
-      oscillator.type='sine';oscillator.frequency.value=frequency;
-      gain.gain.setValueAtTime(0,start);gain.gain.linearRampToValueAtTime(volume,start+0.008);gain.gain.exponentialRampToValueAtTime(0.0001,start+0.10);
-      oscillator.connect(gain);gain.connect(context.destination);oscillator.start(start);oscillator.stop(start+0.11);
-      oscillator.onended=()=>{oscillator.disconnect();gain.disconnect();};
-    });
+    const names={join:'user_join',leave:'user_leave',mute:'mute',unmute:'unmute',deafen:'deafen',undeafen:'undeafen',streamStart:'stream_started',streamStop:'stream_ended'};
+    const name=names[kind];if(!name)return;
+    this.resolve();
+    const failed=error=>{if(!this.warned){this.warned=true;customVoiceLog('warn','[CustomVoice] Discord sound unavailable',{name,message:error?.message});}};
+    try{
+      let sound;
+      if(this.engine?.createSound){
+        sound=this.engine.createSound(name);
+        if(typeof sound?.play!=='function')throw Error('Discord sound player is unavailable');
+      }else if(this.parser){
+        const key=`./${name}.mp3`;if(!this.parser.keys().includes(key))throw Error('Discord sound asset is unavailable');
+        const source=this.parser(key);const audio=new Audio(typeof source==='string'?source:source.default);
+        const nativeVolume=globalThis.BdApi?.Webpack?.getStore?.('MediaEngineStore')?.getOutputVolume?.();
+        audio.volume=Number.isFinite(nativeVolume)?Math.max(0,Math.min(1,nativeVolume/100)):1;
+        if(audio.setSinkId)void audio.setSinkId(settings.outputDevice==='default'?'':settings.outputDevice||'').catch(failed);
+        sound={play:()=>audio.play(),stop:()=>{audio.pause();audio.removeAttribute('src');audio.load();}};
+      }else throw Error('Discord sound module has not loaded');
+      const timer=setTimeout(()=>{this.active.delete(sound);try{sound.stop?.();}catch{}},8000);this.active.set(sound,timer);
+      Promise.resolve(sound.play()).catch(failed);
+    }catch(error){failed(error);}
   }
-  dispose(){this.closed=true;this.off();window.removeEventListener('pointerdown',this.unlock,true);window.removeEventListener('keydown',this.unlock,true);void this.context?.close().catch(()=>{});}
+  dispose(){this.closed=true;this.off();for(const [sound,timer] of this.active){clearTimeout(timer);try{sound.stop?.();}catch{}}this.active.clear();}
 };
 
 var BroadcastPreviews = class {
@@ -54539,20 +54730,319 @@ function BroadcastThumbnail({manager,identity}){
     ?React.createElement('img',{src:preview.image,alt:'방송 미리보기',draggable:false})
     :React.createElement('span',null,preview.error||'방송 미리보기 요청 중…'));
 }
-function BroadcastHover({manager,identity,anchor}){
-  const React=BdApi.React,ref=React.useRef(null);const [ready,setReady]=React.useState(false);
-  React.useEffect(()=>{const timer=setTimeout(()=>setReady(true),250);return()=>clearTimeout(timer);},[identity]);
-  React.useEffect(()=>{if(!ready||!ref.current||!anchor?.isConnected)return;const element=ref.current;const place=()=>{const rect=anchor.getBoundingClientRect();element.style.left=Math.max(8,Math.min(rect.right+10,window.innerWidth-278))+'px';element.style.top=Math.max(8,Math.min(rect.top,window.innerHeight-178))+'px';};element.showPopover?.();place();window.addEventListener('resize',place);return()=>window.removeEventListener('resize',place);},[ready,anchor]);
-  return ready?React.createElement('div',{ref,popover:'manual',role:'tooltip',className:'cv cv-broadcast-hover'},React.createElement(BroadcastThumbnail,{manager,identity})):null;
+function BroadcastHover({manager,identity,anchor,pinned=false,onPin,onClose,onEnter,onLeave}){
+  const React=BdApi.React,ref=React.useRef(null);const [ready,setReady]=React.useState(pinned),[pending,setPending]=React.useState(false);
+  React.useEffect(()=>{if(pinned){setReady(true);return;}const timer=setTimeout(()=>setReady(true),250);return()=>clearTimeout(timer);},[identity,pinned]);
+  React.useEffect(()=>{
+    if(!ready||!ref.current||!anchor?.isConnected)return;
+    const element=ref.current,doc=element.ownerDocument,win=doc.defaultView;
+    const place=()=>{if(!anchor.isConnected){onClose();return;}const rect=anchor.getBoundingClientRect(),size=element.getBoundingClientRect();element.style.left=Math.max(8,Math.min(rect.right+8,win.innerWidth-size.width-8))+'px';element.style.top=Math.max(8,Math.min(rect.top,win.innerHeight-size.height-8))+'px';};
+    const outside=event=>{if(!element.contains(event.target)&&!anchor.contains(event.target))onClose();};
+    const key=event=>{if(event.key==='Escape'){event.preventDefault();event.stopPropagation();onClose();if(pinned)anchor.querySelector('button')?.focus();}};
+    element.showPopover?.();place();
+    if(pinned)element.querySelector('button')?.focus();
+    const observer=new ResizeObserver(place);observer.observe(element);
+    win.addEventListener('resize',place);doc.addEventListener('scroll',place,true);doc.addEventListener('pointerdown',outside,true);doc.addEventListener('keydown',key,true);
+    return()=>{observer.disconnect();win.removeEventListener('resize',place);doc.removeEventListener('scroll',place,true);doc.removeEventListener('pointerdown',outside,true);doc.removeEventListener('keydown',key,true);};
+  },[ready,anchor,pinned,onClose]);
+  if(!ready)return null;
+  const participant=manager.store.get().participants.find(p=>p.mediaIdentity===identity&&p.screenSharing);
+  if(!participant)return null;
+  const self=participant.userId===manager.store.get().user?.id;
+  return React.createElement('div',{ref,popover:'manual',role:'dialog','aria-label':'방송 미리보기',className:'cv cv-broadcast-hover',onPointerEnter:onEnter,onPointerLeave:onLeave,onClick:onPin,onFocus:onPin},
+    React.createElement('div',{className:'cv-preview-heading'},React.createElement('strong',null,'방송 미리보기'),pinned&&React.createElement('button',{type:'button','aria-label':'미리보기 닫기',onClick:event=>{event.stopPropagation();onClose();}},'×')),
+    React.createElement(BroadcastThumbnail,{manager,identity}),
+    React.createElement('button',{type:'button',className:'cv-watch-button',disabled:pending,onClick:event=>{event.stopPropagation();onPin();setPending(true);void manager.watchParticipant(participant).then(onClose).catch(error=>manager.error(error)).finally(()=>setPending(false));}},self?'내 방송 보기':'방송 보기'));
 }
 var customVoiceFeatureCss=`
 .cv-broadcast-thumbnail{width:100%;aspect-ratio:16/9;background:#111318;border-radius:6px;overflow:hidden;display:grid;place-items:center;margin:10px 0;color:var(--text-muted,#aaa);font-size:12px;text-align:center}
 .cv-broadcast-thumbnail img{display:block;width:100%;height:100%;object-fit:contain}
 .cv-broadcast-thumbnail span{padding:12px}
-.cv-broadcast-hover{position:fixed;inset:auto;margin:0;width:270px;padding:7px;border:1px solid #45464b;border-radius:8px;background:#202127;box-shadow:0 8px 24px #0005;pointer-events:none;z-index:2147483647}
+.cv-broadcast-hover{position:fixed;inset:auto;margin:0;width:286px;max-width:calc(100vw - 16px);padding:12px;border:1px solid var(--border-subtle,#ffffff14);border-radius:var(--radius-md,8px);background:var(--background-floating,#111214);box-shadow:var(--elevation-high,0 8px 24px #0005);pointer-events:auto;z-index:2147483647}
+.cv-preview-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;font-size:14px;line-height:20px}
+.cv-preview-heading button{display:grid;place-items:center;width:24px;height:24px;padding:0;font-size:20px;line-height:1;background:transparent}
+.cv-broadcast-hover .cv-watch-button{margin-top:10px}
 .cv-broadcast-hover .cv-broadcast-thumbnail{margin:0}
 .cv-screen .cv-screen-heading{transition:opacity .15s ease,visibility .15s ease}
 .cv-screen:not(.cv-controls-visible):not(:has(:focus-visible)):not(:has(dialog[open])) .cv-screen-heading{opacity:0;visibility:hidden;pointer-events:none}
+`;
+
+// Viewers announce established subscriptions to the publisher. The publisher
+// relays its roster only to those viewers; each roster is scoped to a track SID.
+var BroadcastViewers = class {
+  constructor(manager) {
+    this.manager = manager;
+    this.viewers = new Map();
+    this.sent = new Map();
+    this.listeners = new Set();
+    this.value = [];
+    this.availability = 'available';
+    this.remoteLists = new Map();
+    this.revision = 0;
+    this.rosterRevision = 0;
+    this.bindings = [];
+    this.closed = false;
+    this.off = watchVoiceState(manager.store, ['connection', 'sessionChannel', 'sharing', 'watching', 'mediaRevision'], () => this.sync());
+    this.timer = setInterval(() => this.sync(true), 10000);
+    this.sync();
+  }
+  topic = 'customvoice.viewers.v1';
+  get = () => this.value;
+  getRevision = () => this.revision;
+  subscribe = listener => { this.listeners.add(listener); return () => this.listeners.delete(listener); };
+  notify() { this.revision++; for (const listener of this.listeners) listener(); }
+  getBroadcast(identity) {
+    if (this.manager.store.get().connection !== 'Connected') return { ids: [], availability: 'pending' };
+    if (!identity || identity === this.room?.localParticipant.identity) return { ids: this.value, availability: this.availability };
+    if (this.room?.localParticipant.permissions?.canPublishData === false || this.room?.remoteParticipants.get(identity)?.permissions?.canPublishData === false)
+      return { ids: [], availability: 'unavailable' };
+    return this.remoteLists.get(identity)?.snapshot ?? { ids: [], availability: 'pending' };
+  }
+  publishList() {
+    const peers = !this.closed && this.manager.store.get().sharing ? [...this.room?.remoteParticipants.values() ?? []] : [];
+    const blocked = peers.filter(peer => peer.permissions?.canPublishData === false);
+    const availability = blocked.length ? blocked.length === peers.length ? 'unavailable' : 'partial' : 'available';
+    for (const peer of blocked) this.viewers.delete(peer.identity);
+    const next = [...this.viewers.keys()].sort();
+    if (availability === this.availability && next.length === this.value.length && next.every((id, i) => id === this.value[i])) return false;
+    this.availability = availability;
+    this.value = next;
+    this.rosterRevision++;
+    this.notify();
+    this.sendRoster();
+    return true;
+  }
+  sendRoster(target) {
+    if (this.closed || !this.localSid || !this.manager.store.get().sharing) return;
+    const recipients = target ? [target] : this.value;
+    for (const id of recipients) if (this.viewers.has(id)) this.send(this.room, id, {
+      type: 'viewers', sid: this.localSid, revision: this.rosterRevision, viewers: this.value, availability: this.availability
+    });
+  }
+  refreshRemote(active) {
+    let changed = false;
+    const now = Date.now(), room = this.room;
+    for (const [id, entry] of this.remoteLists) if (active.get(id) !== entry.sid) { this.remoteLists.delete(id); changed = true; }
+    for (const [id, sid] of active) {
+      let entry = this.remoteLists.get(id);
+      if (!entry) {
+        entry = { sid, startedAt: now, revision: -1, reportedIds: [], snapshot: { ids: [], availability: 'pending' } };
+        this.remoteLists.set(id, entry); changed = true;
+      }
+      const blocked = room.localParticipant.permissions?.canPublishData === false || room.remoteParticipants.get(id)?.permissions?.canPublishData === false;
+      if (blocked) { entry.receivedAt = undefined; entry.reportedIds = []; }
+      const fresh = entry.receivedAt !== undefined && now - entry.receivedAt <= 35000;
+      const availability = blocked ? 'unavailable' : fresh ? entry.reportedAvailability : now - entry.startedAt >= 15000 ? 'unconfirmed' : 'pending';
+      const ids = fresh ? entry.reportedIds.filter(viewer => viewer === room.localParticipant.identity || room.remoteParticipants.has(viewer)).sort() : [];
+      if (availability !== entry.snapshot.availability || ids.length !== entry.snapshot.ids.length || ids.some((viewer, i) => viewer !== entry.snapshot.ids[i])) {
+        entry.snapshot = { ids, availability }; changed = true;
+      }
+    }
+    if (changed) this.notify();
+  }
+  send(room, identity, payload) {
+    if (!room?.remoteParticipants.has(identity)) return;
+    // LiveKit silently discards data when this grant is false. A resolved
+    // publishData promise only means bytes were sent, not delivered to a peer.
+    if (room.localParticipant.permissions?.canPublishData === false) return;
+    try {
+      return Promise.resolve(room.localParticipant.publishData(new TextEncoder().encode(JSON.stringify(payload)), {
+        reliable: true, topic: this.topic, destinationIdentities: [identity]
+      })).catch(error => {
+        if (!this.closed && this.room === room) customVoiceLog('warn', '[CustomVoice] Viewer presence delivery failed', { message: error.message });
+      });
+    } catch (error) { customVoiceLog('warn', '[CustomVoice] Viewer presence unavailable', { message: error.message }); }
+  }
+  detach() {
+    for (const [event, listener] of this.bindings) this.room?.off(event, listener);
+    this.bindings = [];
+    for (const [identity, sid] of this.sent) this.send(this.room, identity, { type: 'watch', sid, watching: false });
+    this.sent.clear(); this.viewers.clear(); this.localSid = undefined;
+    if (this.remoteLists.size) { this.remoteLists.clear(); this.notify(); }
+    this.publishList();
+  }
+  bind(room) {
+    const on = (event, listener) => { if (event) { room.on(event, listener); this.bindings.push([event, listener]); } };
+    on(RoomEvent.DataReceived, (data, participant, _kind, topic) => this.receive(room, data, participant, topic));
+    this.permissionState = undefined;
+    on(RoomEvent.ParticipantPermissionsChanged, () => this.sync(true));
+    for (const event of [RoomEvent.TrackSubscribed, RoomEvent.TrackUnsubscribed, RoomEvent.LocalTrackPublished, RoomEvent.LocalTrackUnpublished, RoomEvent.TrackPublished, RoomEvent.TrackUnpublished, RoomEvent.ParticipantConnected])
+      on(event, () => this.sync());
+    on(RoomEvent.ParticipantDisconnected, participant => {
+      this.viewers.delete(participant.identity); this.sent.delete(participant.identity); this.sync();
+    });
+    on(RoomEvent.Reconnecting, () => { this.viewers.clear(); this.sent.clear(); this.remoteLists.clear(); this.publishList(); this.notify(); });
+    on(RoomEvent.Reconnected, () => this.sync(true));
+    on(RoomEvent.Disconnected, () => { this.detach(); this.room = undefined; });
+  }
+  sync(heartbeat = false) {
+    if (this.closed) return;
+    const state = this.manager.store.get();
+    const room = ['Connected', 'Reconnecting'].includes(state.connection) ? this.manager.client.mediaRoom : undefined;
+    if (room !== this.room) { this.detach(); this.room = room; if (room) this.bind(room); }
+    if (!room || state.connection !== 'Connected') return;
+    const canPublishData = room.localParticipant.permissions?.canPublishData;
+    const blockedPeers = [...room.remoteParticipants.values()].filter(peer => peer.permissions?.canPublishData === false).length;
+    const permissionState = `${canPublishData}:${blockedPeers}`;
+    if (this.permissionState !== permissionState) {
+      this.permissionState = permissionState;
+      customVoiceLog(canPublishData === false || blockedPeers ? 'warn' : 'info', '[CustomVoice] Viewer presence permissions', { canPublishData, blockedPeers });
+      this.notify();
+    }
+    const local = state.sharing && room.localParticipant.getTrackPublication(Track.Source.ScreenShare);
+    const sid = local?.track?.mediaStreamTrack?.readyState !== 'ended' ? local?.trackSid : undefined;
+    if (sid !== this.localSid) { this.localSid = sid; this.viewers.clear(); this.rosterRevision++; heartbeat = true; }
+    const now = Date.now();
+    for (const [id, at] of this.viewers) if (!room.remoteParticipants.has(id) || now - at > 35000) this.viewers.delete(id);
+    const rosterChanged = this.publishList();
+    if (heartbeat && !rosterChanged) this.sendRoster();
+    const active = new Map();
+    for (const id of state.watching) {
+      const publication = room.remoteParticipants.get(id)?.getTrackPublication(Track.Source.ScreenShare);
+      if (publication?.trackSid && publication.track && publication.isSubscribed !== false && publication.track.mediaStreamTrack?.readyState !== 'ended') active.set(id, publication.trackSid);
+    }
+    this.refreshRemote(active);
+    if (room.localParticipant.permissions?.canPublishData === false) { this.sent.clear(); return; }
+    for (const [id, previous] of this.sent) if (active.get(id) !== previous) this.send(room, id, { type: 'watch', sid: previous, watching: false });
+    for (const [id, targetSid] of active) if (targetSid && (heartbeat || this.sent.get(id) !== targetSid)) this.send(room, id, { type: 'watch', sid: targetSid, watching: true });
+    this.sent = active;
+  }
+  receive(room, bytes, participant, topic) {
+    if (this.closed || this.manager.store.get().connection !== 'Connected' || room !== this.room || topic !== this.topic || !participant || room.remoteParticipants.get(participant.identity) !== participant || participant.permissions?.canPublishData === false || bytes?.byteLength > 15000) return;
+    let message;
+    try { message = JSON.parse(new TextDecoder().decode(bytes)); } catch { return; }
+    if (message?.type === 'viewers') { this.receiveRoster(room, message, participant); return; }
+    if (bytes.byteLength > 1024) return;
+    if (message?.type !== 'watch' || typeof message.watching !== 'boolean' || !this.localSid || message.sid !== this.localSid || !this.manager.store.get().sharing) return;
+    if (message.watching) this.viewers.set(participant.identity, Date.now());
+    else this.viewers.delete(participant.identity);
+    const changed = this.publishList();
+    // A watch heartbeat also requests the latest roster, supporting rewatch,
+    // startup races, and retransmission without counting previews as viewers.
+    if (message.watching && !changed) this.sendRoster(participant.identity);
+  }
+  receiveRoster(room, message, participant) {
+    const state = this.manager.store.get(), id = participant.identity;
+    const publication = participant.getTrackPublication(Track.Source.ScreenShare);
+    const entry = this.remoteLists.get(id);
+    if (state.connection !== 'Connected' || !state.watching.includes(id) || !entry || entry.sid !== message.sid || publication?.trackSid !== message.sid || !publication.track || publication.isSubscribed === false || publication.track.mediaStreamTrack?.readyState === 'ended') return;
+    if (!Number.isSafeInteger(message.revision) || message.revision < 0 || message.revision < entry.revision || !['available', 'partial', 'unavailable'].includes(message.availability)) return;
+    if (!Array.isArray(message.viewers) || message.viewers.length > 512 || message.viewers.some(viewer => typeof viewer !== 'string' || !viewer || viewer.length > 256) || !message.viewers.includes(room.localParticipant.identity)) return;
+    entry.reportedIds = [...new Set(message.viewers)].filter(viewer => viewer !== id);
+    entry.reportedAvailability = message.availability;
+    entry.revision = message.revision; entry.receivedAt = Date.now();
+    this.refreshRemote(new Map([...this.remoteLists].map(([identity, value]) => [identity, value.sid])));
+  }
+  dispose() {
+    if (this.closed) return;
+    this.closed = true; this.off(); clearInterval(this.timer); this.detach(); this.room = undefined; this.listeners.clear();
+  }
+};
+
+function BroadcastViewerList({manager, identity: broadcastIdentity}) {
+  const React = BdApi.React, service = manager.viewers;
+  React.useSyncExternalStore(service.subscribe, service.getRevision);
+  const snapshot = React.useMemo(() => createVoiceSnapshot(manager.store, ['profiles', 'participants', 'user', 'sharing', 'watching', 'connection']), [manager]);
+  const state = React.useSyncExternalStore(manager.store.subscribe, snapshot);
+  const compat = React.useMemo(() => new Compatibility(BdApi), []);
+  const room = manager.client.mediaRoom, self = !broadcastIdentity || broadcastIdentity === room?.localParticipant.identity;
+  if (self ? !state.sharing : !state.watching.includes(broadcastIdentity)) return null;
+  const { ids, availability } = service.getBroadcast(broadcastIdentity);
+  const unavailable = availability === 'unavailable', partial = availability === 'partial', pending = availability === 'pending', unconfirmed = availability === 'unconfirmed';
+  const label = unavailable || unconfirmed ? '시청자 확인 불가' : pending ? '시청자 확인 중…' : `${partial ? '확인된 ' : ''}시청자 ${ids.length}명`;
+  return React.createElement('details', {className: 'cv-viewers'},
+    React.createElement('summary', {'aria-label': `${self ? '내' : '이'} 방송 ${label}`}, label),
+    React.createElement('div', {className: 'cv-viewers-list'},
+      React.createElement('strong', null, '이 방송을 보는 사람'),
+      ids.length ? React.createElement('ul', null, ids.map(id => {
+        const participant = state.participants.find(p => p.mediaIdentity === id);
+        const me = id === room?.localParticipant.identity;
+        const user = participant ? identity(participant, state, manager, compat) : {name: (me ? state.user?.username || room.localParticipant.name : room?.remoteParticipants.get(id)?.name) || '사용자'};
+        return React.createElement('li', {key: id}, React.createElement(Avatar, {name: user.name, url: user.avatar}), React.createElement('span', {title: user.name, dir: 'auto'}, user.name, me ? ' (나)' : ''));
+      })) : !unavailable && !pending && !unconfirmed && React.createElement('p', null, '확인된 시청자가 없습니다.'),
+      pending && React.createElement('p', {className: 'cv-hint'}, '방송자의 시청자 목록을 확인하고 있습니다.'),
+      unconfirmed && React.createElement('p', {className: 'cv-hint'}, '시청자 목록을 받지 못했습니다. 방송자와 본인 모두 1.1.11 이상인지 확인한 뒤 다시 시청해 주세요.'),
+      (unavailable || partial) && React.createElement('p', {className: 'cv-hint'}, '서버 설정으로 시청 알림이 차단되어 ' + (partial ? '일부 시청자를' : '시청자를') + ' 확인할 수 없습니다. 서버 관리자가 시청 알림을 허용한 뒤 채널에 다시 입장해 주세요.'),
+      React.createElement('p', {className: 'cv-hint'}, '시청자 집계는 1.1.8 이상을 지원합니다. 시청 중인 목록 확인은 방송자와 본인 모두 1.1.11 이상이어야 합니다. 미리보기와 방송자 본인은 집계하지 않습니다.')));
+}
+
+// Receiver progress is independent of the broadcaster's outbound FPS.
+function createRemoteScreenRecovery(recover, now = () => Date.now()) {
+  let previous, rendered, decodedAt = now(), renderedAt = decodedAt, incoming = 0;
+  let pending = false, nextAttempt = 0, disposed = false;
+  function reset() { previous = undefined; rendered = undefined; incoming = 0; decodedAt = renderedAt = now(); }
+  return {
+    reset,
+    observe(stats, { active = true, renderedFrames, muted = false } = {}) {
+      if (disposed) return;
+      const time = now(), sample = stats?.sample;
+      if (!active) { reset(); return; }
+      if (sample && (!previous || previous.id !== sample.id || sample.frames < previous.frames)) {
+        previous = sample; decodedAt = renderedAt = time; incoming = 0;
+      } else if (sample && sample.timestamp > previous.timestamp) {
+        if (sample.frames > previous.frames) { decodedAt = time; incoming = 0; }
+        else if (Number.isFinite(sample.bytes) && Number.isFinite(previous.bytes)) incoming += Math.max(0, sample.bytes - previous.bytes);
+        previous = sample;
+      }
+      if (Number.isFinite(renderedFrames) && renderedFrames !== rendered) { rendered = renderedFrames; renderedAt = time; }
+      // A static stream with no incoming packets is not a decoder failure.
+      const decodeStalled = time - decodedAt >= 8000 && (incoming > 0 || muted || previous?.frames === 0);
+      const renderStalled = Number.isFinite(renderedFrames) && time - renderedAt >= 8000 && time - decodedAt < 4000;
+      if (pending || time < nextAttempt || !decodeStalled && !renderStalled) return;
+      const details = { reason: decodeStalled ? 'decode-stalled' : 'playback-stalled', framesDecoded: previous?.frames, bytesWhileStalled: incoming };
+      pending = true; nextAttempt = time + 15000; decodedAt = renderedAt = time; incoming = 0;
+      void Promise.resolve().then(() => { if (!disposed) return recover(details); }).catch(() => {}).finally(() => { pending = false; });
+    },
+    dispose() { disposed = true; }
+  };
+}
+
+// Use Discord theme tokens; size nickname rows independently of optional badges.
+var customVoiceDiscordCss = `
+.cv{font-family:var(--cv-font-family,var(--font-primary,"gg sans","Noto Sans",sans-serif));font-size:14px;line-height:1.42857143;font-weight:400;letter-spacing:normal;text-align:left;color:var(--text-normal,#dbdee1)}
+.cv button,.cv input,.cv select,.cv textarea{font-family:inherit;letter-spacing:inherit;line-height:inherit}
+.cv button{font-weight:500;box-sizing:border-box}
+.cv button,.cv summary{user-select:none;-webkit-user-select:none}
+.cv h2,.cv h3,.cv strong{font-family:inherit;letter-spacing:normal}
+.cv .cv-icon{display:block;flex-shrink:0}
+.cv-avatar{font-family:inherit;font-weight:500;line-height:1;overflow:hidden}
+.cv-avatar img{display:block;object-fit:cover}
+.cv-participants{padding:0 8px 0 32px}
+.cv-participants .cv-participant{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;min-height:var(--cv-participant-height,32px);padding:0 4px 0 0;column-gap:4px;font-size:var(--cv-participant-font-size,14px);font-weight:500;line-height:20px}
+.cv-participants .cv-participant-target{display:grid;grid-template-columns:24px minmax(0,1fr) auto;align-items:center;gap:8px;width:100%;min-width:0;min-height:var(--cv-participant-height,32px);padding:4px 8px;border:0;margin:0;font:inherit;text-align:left;background:transparent;box-shadow:none}
+.cv-participants .cv-user-name{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:20px;unicode-bidi:plaintext}
+.cv-participants .cv-badges{display:flex;align-items:center;justify-content:flex-end;gap:4px;margin:0;min-width:0;line-height:1}
+.cv-participants .cv-badges:empty{display:none}
+.cv-participants .cv-badges>span{display:flex;align-items:center;justify-content:center;width:16px;height:20px}
+.cv-participants .cv-avatar{width:24px;height:24px;margin:0}
+.cv-participant>.cv-live{align-self:center;white-space:nowrap}
+.cv-card .cv-user-name{line-height:20px;unicode-bidi:plaintext}
+.cv-card .cv-badges{display:flex;align-items:center;gap:4px;line-height:1}
+.cv-channel-list .cv-category{letter-spacing:normal;text-transform:none}
+.cv .cv-user-profile h3{line-height:1.2;word-break:break-word}
+.cv .cv-quality-dialog,.cv .cv-settings-dialog{font-family:inherit;line-height:1.5}
+.cv-quality-dialog{max-height:calc(100vh - 32px);overflow:auto}
+.cv-quality-dialog h3{font-size:16px;line-height:24px;font-weight:600;margin:0 0 16px}
+.cv-quality-dialog .cv-hint{margin:8px 0}
+.cv-settings label{line-height:20px}
+.cv-settings select{color-scheme:inherit}
+.cv-screen-toolbar button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:28px;line-height:18px}
+.cv-stream-heading-actions{min-width:0;line-height:20px}
+.cv-stream-resolution{font-variant-numeric:tabular-nums;white-space:nowrap}
+.cv-viewers{position:relative;flex:none;max-width:100%;font-size:12px;line-height:18px;color:var(--text-normal,#dbdee1)}
+.cv-viewers summary{display:flex;align-items:center;gap:4px;padding:4px 8px;border-radius:4px;cursor:pointer;list-style:none;white-space:nowrap;background:var(--background-modifier-hover,#35373c);font-weight:500}
+.cv-viewers summary::after{content:"▾";font-size:10px}
+.cv-viewers[open] summary::after{content:"▴"}
+.cv-viewers summary:focus-visible{outline:2px solid var(--brand-500,#5865f2);outline-offset:2px}
+.cv-viewers-list{position:absolute;right:0;top:calc(100% + 6px);width:250px;max-width:calc(100vw - 32px);padding:12px;background:var(--background-floating,#111214);border:1px solid var(--border-subtle,#ffffff14);border-radius:8px;box-shadow:var(--elevation-high,0 8px 24px #0006);z-index:5;text-align:left}
+.cv-viewers-list strong{display:block;font-size:14px;line-height:20px}
+.cv-viewers-list ul{list-style:none;margin:8px 0;padding:0;max-height:200px;overflow:auto}
+.cv-viewers-list li{display:grid;grid-template-columns:24px minmax(0,1fr);align-items:center;gap:8px;padding:4px 0;font-size:14px;line-height:20px}
+.cv-viewers-list li>span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cv-viewers-list p{margin:8px 0 0;line-height:18px}
+.cv-screen:has(.cv-viewers[open])>.cv-screen-heading{opacity:1!important;visibility:visible!important;pointer-events:auto}
+.cv .cv-audio-state{font-size:12px;line-height:18px;color:var(--text-muted,#949ba4)}
+@media(prefers-reduced-motion:reduce){.cv *{scroll-behavior:auto}}
 `;
 
 // </CustomVoiceFeatures>
@@ -55288,7 +55778,7 @@ var VoiceSessionManager = class {
         ...this.store.get().settings,
         shareQuality: selected.quality,
         shareFps: selected.fps,
-        shareAudio: this.client.screenShareAudioEnabled
+        shareAudio: selected.audioRequested ?? s.shareAudio
       } : this.store.get().settings;
       this.store.set({ sharing, settings });
       if (sharing && selected) this.save(settings);
@@ -55332,7 +55822,7 @@ var VoiceSessionManager = class {
       try { await this.client.setScreenShareAudio(audio); }
       finally {
         if (current()) {
-          const settings = { ...this.store.get().settings, shareAudio: this.client.screenShareAudioEnabled };
+          const settings = { ...this.store.get().settings, shareAudio: audio };
           this.store.set({ settings });
           this.save(settings);
         }
@@ -55346,6 +55836,10 @@ var VoiceSessionManager = class {
       ...watch ? { viewVisible: true } : {},
       watching: watch ? [.../* @__PURE__ */ new Set([...this.store.get().watching, identity2])] : this.store.get().watching.filter((id2) => id2 !== identity2)
     });
+    if (watch) {
+      this.media.syncScreenAudio(identity2);
+      void this.media.resumeAudio().catch(error => this.error(error));
+    }
   }
   async watchParticipant(participant) {
     const state = this.store.get();
@@ -55793,13 +56287,23 @@ var Compatibility = class {
       'a[href^="/channels/"], [data-list-item-id^="channels___"]'
     );
     if (!row) return;
-    const style = getComputedStyle(row);
+    const style = getComputedStyle(row.querySelector('[class*="name_"]') ?? row);
     const fontSize = parseFloat(style.fontSize);
     const height = row.getBoundingClientRect().height;
     if (fontSize >= 12 && fontSize <= 20 && host.style.getPropertyValue("--cv-channel-font-size") !== style.fontSize)
       host.style.setProperty("--cv-channel-font-size", style.fontSize);
     if (height >= 28 && height <= 48 && host.style.getPropertyValue("--cv-channel-height") !== `${height}px`)
       host.style.setProperty("--cv-channel-height", `${height}px`);
+    if (style.fontFamily && host.style.getPropertyValue("--cv-font-family") !== style.fontFamily)
+      host.style.setProperty("--cv-font-family", style.fontFamily);
+    const voiceRow = [...(this.channelList()?.querySelectorAll('[class*="voiceUser_"]') ?? [])].find(element => !element.closest('[data-custom-voice]'));
+    if (voiceRow) {
+      const name = voiceRow.querySelector('[class*="username_"], [class*="name_"]');
+      const size = name && getComputedStyle(name).fontSize;
+      const rowHeight = voiceRow.getBoundingClientRect().height;
+      if (parseFloat(size) >= 12 && parseFloat(size) <= 20) host.style.setProperty("--cv-participant-font-size", size);
+      if (rowHeight >= 28 && rowHeight <= 48) host.style.setProperty("--cv-participant-height", `${rowHeight}px`);
+    }
   }
   voicePanel() {
     const list = this.channelList();
@@ -56317,7 +56821,7 @@ function createServerSetup(manager, compat) {
 }
 
 // package.json
-var version3 = "1.1.6";
+var version3 = "1.1.16";
 
 // src/components/settings.ts
 function createSettingsPanel(manager, compat) {
@@ -56548,12 +57052,12 @@ function createSettingsPanel(manager, compat) {
     "화면 공유 목표 FPS",
     shareFrameRates.map((n) => [String(n), String(n)])
   );
-  input2("shareAudio", "소리 공유 (창: 해당 앱 / 화면: 시스템)", "checkbox");
+  input2("shareAudio", "공유 대상 소리", "checkbox");
+  for (const description of shareAudioDescriptions) paragraph(description).className = "cv-hint";
   input2("autoReconnect", "\uC790\uB3D9 \uC7AC\uC5F0\uACB0", "checkbox");
   input2("shareBorder", "화면 공유 노란 테두리 표시 (다음 방송)", "checkbox");
   input2("soundEffects", "접속·음소거·방송 효과음", "checkbox");
-  const soundVolume = input2("soundVolume", "효과음 볼륨", "range");
-  soundVolume.min = "0"; soundVolume.max = "1"; soundVolume.step = "0.05";
+  paragraph("입장·퇴장·음소거·방송 효과음은 Discord의 기본 효과음과 출력 볼륨을 사용합니다.").className = "cv-hint";
   input2("notifications", "\uC624\uB958 \uC54C\uB9BC", "checkbox");
   input2("debug", "\uB514\uBC84\uADF8 \uB85C\uADF8 (\uD1A0\uD070 \uC81C\uC678)", "checkbox");
   const error62 = paragraph("");
@@ -57334,7 +57838,7 @@ var ScreenHUD = class {
       const fields = {
         send: value(stats?.fps), capture: value(stats?.captureFps),
         encoder: `${screenEncoderLabel(stats)} · ${stats?.codec ?? "—"} · ${Number.isFinite(stats?.processingMs) ? stats.processingMs.toFixed(1) : "—"} ms`,
-        detail: `목표 ${this.manager.store.get().settings.shareFps} · 새 화면 ${value(stats?.native?.sourceFps)} FPS${stats?.native?.encoderPressured ? ` · 처리 ${value(stats.native.pacingFps)}` : ""}`
+        detail: stats?.native?.sourceAvailable === false ? stats?.native?.holdingFrame ? "마지막 게임 화면 유지 중 · 새 화면 대기" : "게임 화면 대기 중 · 공유한 창으로 돌아가세요" : `목표 ${this.manager.store.get().settings.shareFps} · 새 화면 ${value(stats?.native?.sourceFps)} FPS${stats?.native?.encoderPressured ? ` · 처리 ${value(stats.native.pacingFps)}` : ""}`
       };
       for (const [key, text] of Object.entries(fields)) if (entry.nodes[key].textContent !== text) entry.nodes[key].textContent = text;
       entry.nodes.encoder.title = stats?.encoder ?? "실제 인코더 정보 대기 중";
@@ -57377,7 +57881,7 @@ function ShareQuality({ manager }) {
       ? "테두리 숨김이 허용되었습니다. 다른 캡처 앱이 사용 중이면 테두리가 남을 수 있습니다."
       : "");
   const bridge = globalThis.CustomVoiceNative;
-  const restartNotice = bridge && (newerVersion("1.1.6", bridge.version ?? "0.0.0") || captureControl && newerVersion("1.1.6", captureInfo?.hostVersion ?? "0.0.0"))
+  const restartNotice = bridge && (newerVersion("1.1.12", bridge.version ?? "0.0.0") || captureControl && newerVersion("1.1.12", captureInfo?.hostVersion ?? "0.0.0"))
     ? "이전 캡처 연결이 로드되어 있습니다. Discord를 완전히 종료한 뒤 다시 실행하면 최신 개선 사항이 적용됩니다."
     : "";
   const borderToggle = import_react4.default.createElement("label", {
@@ -57413,8 +57917,8 @@ function ShareQuality({ manager }) {
     "input",
     {
       type: "checkbox",
-      "aria-label": "\uC18C\uB9AC \uACF5\uC720",
-      checked: settings.shareAudio,
+      "aria-label": "공유 대상 소리",
+      checked: manager.client.screenShareAudioEnabled,
       disabled: pending,
       onChange: (event) => {
         setPending(true);
@@ -57422,7 +57926,7 @@ function ShareQuality({ manager }) {
         void manager.changeShareAudio(event.target.checked).catch((e2) => setError(e2.message)).finally(() => setPending(false));
       }
     }
-  ), " \uC2DC\uC2A4\uD15C \uC18C\uB9AC \uACF5\uC720"), /* @__PURE__ */ import_react4.default.createElement("label", null, "\uC1A1\uCD9C \uD654\uC9C8", /* @__PURE__ */ import_react4.default.createElement(
+  ), " 공유 대상 소리"), import_react4.default.createElement("p", { className: "cv-audio-state", role: "status" }, manager.client.screenShareAudioEnabled ? "현재 공유 대상의 소리를 송출하고 있습니다." : "현재 방송에는 소리를 보내지 않습니다. 위 옵션을 켜면 소리 캡처를 시작하거나 다시 시도합니다."), shareAudioDescriptions.map((description) => import_react4.default.createElement("p", { key: description, className: "cv-hint" }, description)), /* @__PURE__ */ import_react4.default.createElement("label", null, "\uC1A1\uCD9C \uD654\uC9C8", /* @__PURE__ */ import_react4.default.createElement(
     "select",
     {
       "aria-label": "\uC1A1\uCD9C \uD654\uC9C8",
@@ -57491,6 +57995,7 @@ function readScreenStats(report, previous, local) {
   const source = local ? report.get?.(selected.mediaSourceId) : void 0;
   const sample = {
     id: selected.id, timestamp: selected.timestamp, frames: selected[framesKey],
+    bytes: local ? selected.bytesSent : selected.bytesReceived,
     sentFrames: local ? selected.framesSent : void 0,
     time: local ? selected.totalEncodeTime : selected.totalDecodeTime,
     source: source ? { id: source.id, timestamp: source.timestamp, frames: source.frames } : void 0
@@ -57544,6 +58049,10 @@ function watchScreenStats(track, local, doc, update, interval = 2000) {
             watcher.lastLog = stats.sample.timestamp;
             customVoiceLog("info", "[CustomVoice] Screen performance", JSON.stringify({ target: stats.captureLimit, ...stats.native, captureFps: stats.captureFps, sendFps: stats.fps, encodeFps: stats.encodeFps, encodeMs: stats.processingMs, encoder: stats.encoder, powerEfficientEncoder: stats.powerEfficientEncoder, codec: stats.codec, codecParameters: stats.codecParameters, limitation: stats.limitation }));
           }
+        }
+        if (stats && !local && (!watcher.lastLog || stats.sample.timestamp - watcher.lastLog >= 10000)) {
+          watcher.lastLog = stats.sample.timestamp;
+          customVoiceLog('info', '[CustomVoice] Remote screen performance', { trackSid: track.sid, decodeFps: stats.fps, framesDecoded: stats.sample.frames, bytesReceived: stats.sample.bytes });
         }
         for (const s of watcher.subscribers) if (!s.doc.hidden) s.update(stats);
       } catch {
@@ -57628,7 +58137,36 @@ var Screen = import_react5.default.memo(function Screen({ identity: identity2, m
     } else {
       track.attach(element);
       play();
-      detach = () => { element.pause(); try { track.detach(element); } finally { element.srcObject = null; } };
+      let displayed = 0, frameRequest, disposed = false;
+      const doc = element.ownerDocument;
+      let inView = true;
+      const Observer = doc.defaultView?.IntersectionObserver;
+      const visibility = Observer ? new Observer(entries => { inView = entries.some(entry => entry.isIntersecting); if (!inView) recovery.reset(); }) : undefined;
+      const presented = () => { if (disposed) return; displayed++; frameRequest = element.requestVideoFrameCallback(presented); };
+      if (element.requestVideoFrameCallback) frameRequest = element.requestVideoFrameCallback(presented);
+      const recovery = createRemoteScreenRecovery(async details => {
+        if (disposed || manager.client.mediaRoom !== room || !manager.client.watching.has(identity2)) return;
+        customVoiceLog('warn', '[CustomVoice] Remote video stalled', { trackSid: publication?.trackSid, ...details });
+        if (details.reason === 'playback-stalled') { track.detach(element); track.attach(element); play(); }
+        else await manager.client.recoverScreenSubscription(identity2, publication?.trackSid);
+      });
+      visibility?.observe(element);
+      const visible = () => { recovery.reset(); if (!doc.hidden) play(); };
+      doc.addEventListener('visibilitychange', visible);
+      track.mediaStreamTrack?.addEventListener('unmute', visible);
+      const stopStats = watchScreenStats(track, false, doc, stats => recovery.observe(stats, {
+        active: manager.client.mediaRoom === room && manager.client.watching.has(identity2) && inView && !doc.hidden && element.isConnected && !element.paused && !publication?.isMuted && track.streamState !== 'paused',
+        renderedFrames: element.requestVideoFrameCallback ? displayed : undefined,
+        muted: track.mediaStreamTrack?.muted === true
+      }));
+      detach = () => {
+        disposed = true; recovery.dispose(); stopStats();
+        visibility?.disconnect();
+        if (frameRequest !== undefined) element.cancelVideoFrameCallback?.(frameRequest);
+        doc.removeEventListener('visibilitychange', visible);
+        track.mediaStreamTrack?.removeEventListener('unmute', visible);
+        element.pause(); try { track.detach(element); } finally { element.srcObject = null; }
+      };
     }
     track.mediaStreamTrack?.addEventListener("ended", ended);
     return () => {
@@ -57677,7 +58215,7 @@ var Screen = import_react5.default.memo(function Screen({ identity: identity2, m
   ) : /* @__PURE__ */ import_react5.default.createElement("span", null, state.sessionChannel?.name, " \xB7 ", name, "\uC758 \uD654\uBA74", self ? " \xB7 \uB0B4 \uBC29\uC1A1" : ""), /* @__PURE__ */ import_react5.default.createElement("span", { className: "cv-stream-heading-actions" }, resolution2 && !compact2 && /* @__PURE__ */ import_react5.default.createElement("span", {
     className: "cv-stream-resolution",
     title: [self ? `목표 ${state.settings.shareFps} FPS` : "실제 수신 디코딩 FPS", self && Number.isFinite(screenStats?.captureLimit) ? `캡처 적용값 ${Math.round(screenStats.captureLimit)} FPS` : "", self && Number.isFinite(screenStats?.native?.sourceFps) ? `소스 입력 ${Math.round(screenStats.native.sourceFps)} FPS` : "", self && screenStats?.captureFps !== void 0 ? `캡처 출력 ${Math.round(screenStats.captureFps)} FPS` : "", self && screenStats?.fps !== void 0 ? `실제 송출 ${Math.round(screenStats.fps)} FPS` : "", self && Number.isFinite(screenStats?.native?.repeatedFps) ? `프레임 재사용 ${Math.round(screenStats.native.repeatedFps)} FPS` : "", screenStats?.backend, screenStats?.codec, screenStats?.encoder, screenStats?.processingMs !== void 0 ? `${self ? "인코딩" : "디코딩"} ${screenStats.processingMs.toFixed(1)} ms` : "", screenStats?.limitation === "cpu" ? "처리 성능 제한" : screenStats?.limitation === "bandwidth" ? "네트워크 대역폭 제한" : ""].filter(Boolean).join(" · ")
-  }, resolution2, screenStats?.fps !== void 0 ? ` · ${Math.round(screenStats.fps)} FPS` : ""), " ", /* @__PURE__ */ import_react5.default.createElement("span", { className: "cv-live" }, "LIVE"), !compact2 && !detached && /* @__PURE__ */ import_react5.default.createElement(
+  }, resolution2, screenStats?.fps !== void 0 ? ` · ${Math.round(screenStats.fps)} FPS` : ""), " ", /* @__PURE__ */ import_react5.default.createElement("span", { className: "cv-live" }, "LIVE"), manager.viewers && import_react5.default.createElement(BroadcastViewerList, { manager, identity: identity2 }), !compact2 && !detached && /* @__PURE__ */ import_react5.default.createElement(
     "button",
     {
       className: "cv-stream-back",
@@ -57910,7 +58448,19 @@ function Participants({
   const state = useVoice(manager.store);
   const [selected, setSelected] = (0, import_react6.useState)();
   const [hovered, setHovered] = (0, import_react6.useState)();
+  const previewTimer = import_react6.useRef();
   const close = import_react6.default.useCallback(() => setSelected(void 0), []);
+  const closePreview = import_react6.default.useCallback(() => { clearTimeout(previewTimer.current); setHovered(void 0); }, []);
+  const keepPreview = import_react6.default.useCallback(() => clearTimeout(previewTimer.current), []);
+  const pinPreview = import_react6.default.useCallback(() => { clearTimeout(previewTimer.current); setHovered(value => value && !value.pinned ? { ...value, pinned: true } : value); }, []);
+  const leavePreview = import_react6.default.useCallback(() => {
+    clearTimeout(previewTimer.current);
+    previewTimer.current = setTimeout(() => setHovered(value => value?.pinned ? value : void 0), 220);
+  }, []);
+  import_react6.useEffect(() => () => clearTimeout(previewTimer.current), []);
+  import_react6.useEffect(() => {
+    if (hovered && !participants.some(p => p.userId === hovered.userId && p.screenSharing)) closePreview();
+  }, [participants, hovered, closePreview]);
   const selectedParticipant = participants.find(
     (p) => p.userId === selected?.userId
   );
@@ -57924,11 +58474,12 @@ function Participants({
       {
         key: p.userId,
         className: cards ? "cv-card" : "cv-participant",
-        onPointerEnter: event => { if (p.screenSharing) setHovered({ userId: p.userId, anchor: event.currentTarget }); },
-        onPointerLeave: () => setHovered(void 0),
+        onPointerEnter: event => { keepPreview(); if (p.screenSharing) { const anchor = event.currentTarget; setHovered(value => value?.pinned ? value : { userId: p.userId, anchor }); } },
+        onPointerLeave: leavePreview,
         onContextMenu: (e2) => {
           const menuEvent = captureContextMenuEvent(e2);
           close();
+          closePreview();
           run(
             manager,
             manager.loadPermissions(p.channelId).then(
@@ -57945,13 +58496,19 @@ function Participants({
         {
           type: "button",
           className: "cv-participant-target",
-          "aria-label": `${user.name} \uC0AC\uC6A9\uC790 \uC815\uBCF4`,
-          "aria-expanded": selected?.userId === p.userId,
+          "aria-label": `${user.name} ${p.screenSharing ? "방송 미리보기" : "사용자 정보"}`,
+          "aria-expanded": p.screenSharing ? hovered?.userId === p.userId && !!hovered.pinned : selected?.userId === p.userId,
           "aria-haspopup": "dialog",
           onKeyDown: keyboardContextMenu,
-          onClick: (e2) => setSelected(
-            selected?.userId === p.userId ? void 0 : { userId: p.userId, anchor: e2.currentTarget }
-          )
+          onClick: (e2) => {
+            if (p.screenSharing) {
+              close(); keepPreview();
+              setHovered(hovered?.userId === p.userId && hovered.pinned ? void 0 : { userId: p.userId, anchor: e2.currentTarget.closest('.cv-participant,.cv-card'), pinned: true });
+            } else {
+              closePreview();
+              setSelected(selected?.userId === p.userId ? void 0 : { userId: p.userId, anchor: e2.currentTarget });
+            }
+          }
         },
         /* @__PURE__ */ import_react6.default.createElement(
           Avatar,
@@ -57961,7 +58518,7 @@ function Participants({
             speaking: state.speakers.includes(p.mediaIdentity) && !p.muted && !p.serverMuted && !p.deafened
           }
         ),
-        /* @__PURE__ */ import_react6.default.createElement("span", { className: "cv-user-name" }, user.name),
+        /* @__PURE__ */ import_react6.default.createElement("span", { className: "cv-user-name", title: user.name, dir: "auto" }, user.name),
         /* @__PURE__ */ import_react6.default.createElement("span", { className: "cv-badges" }, (p.muted || p.serverMuted) && /* @__PURE__ */ import_react6.default.createElement("span", { title: p.serverMuted ? "\uC11C\uBC84 \uC74C\uC18C\uAC70\uB428" : "\uC74C\uC18C\uAC70\uB428" }, /* @__PURE__ */ import_react6.default.createElement(Icon, { name: "mic", muted: true, size: 16 })), p.deafened && /* @__PURE__ */ import_react6.default.createElement("span", { title: "\uD5E4\uB4DC\uC14B \uC74C\uC18C\uAC70\uB428" }, /* @__PURE__ */ import_react6.default.createElement(Icon, { name: "headphones", muted: true, size: 16 })))
       ),
       p.screenSharing && /* @__PURE__ */ import_react6.default.createElement(
@@ -57992,7 +58549,7 @@ function Participants({
         watching ? "\uC2DC\uCCAD \uC885\uB8CC" : "\uBC29\uC1A1 \uBCF4\uAE30"
       )
     );
-  }), !selected && hovered && participants.find(p => p.userId === hovered.userId && p.screenSharing) && import_react6.default.createElement(BroadcastHover, { key: hovered.userId, manager, identity: participants.find(p => p.userId === hovered.userId).mediaIdentity, anchor: hovered.anchor }), selected && selectedParticipant && profile && /* @__PURE__ */ import_react6.default.createElement(
+  }), !selected && hovered && participants.find(p => p.userId === hovered.userId && p.screenSharing) && import_react6.default.createElement(BroadcastHover, { key: hovered.userId, manager, identity: participants.find(p => p.userId === hovered.userId).mediaIdentity, anchor: hovered.anchor, pinned: !!hovered.pinned, onPin: pinPreview, onClose: closePreview, onEnter: keepPreview, onLeave: leavePreview }), selected && selectedParticipant && profile && /* @__PURE__ */ import_react6.default.createElement(
     ParticipantPopover,
     {
       key: selected.userId,
@@ -58960,7 +59517,7 @@ function createNativeUpdatePanel() {
     try{
       const result=await bridge().checkNativeUpdate();if(disposed||request!==revision)return;info=result;
       status.textContent=result.available?`native ${result.latestVersion} 업데이트가 있습니다.`:'native는 최신 버전입니다.';
-      const required='1.1.6';
+      const required='1.1.12';
       if(newerVersion(required,result.installedVersion)&&newerVersion(required,result.latestVersion))status.textContent=`이 플러그인에 필요한 native ${required}가 정식 릴리스에 아직 없습니다. 전체 ZIP으로 업데이트해 주세요.`;
       if(result.pending&&['downloading','waiting','applying','failed'].includes(result.pending.state))showState(result.pending);
       else {pending=result.pending;clearTimeout(timer);}
@@ -58981,7 +59538,7 @@ function createNativeUpdatePanel() {
 
 
 // src/index.ts
-css += "\n" + customVoiceFeatureCss;
+css += "\n" + customVoiceFeatureCss + "\n" + customVoiceDiscordCss;
 var CustomVoice = class {
   manager;
   integration;
@@ -59021,6 +59578,7 @@ var CustomVoice = class {
       BdApi.DOM.addStyle("CustomVoice", css);
       this.manager.sounds = new VoiceSounds(this.manager);
       this.manager.previews = new BroadcastPreviews(this.manager);
+      this.manager.viewers = new BroadcastViewers(this.manager);
       this.integration = new DiscordIntegration(this.manager);
       this.manager.start();
       this.integration.start();
@@ -59043,6 +59601,7 @@ var CustomVoice = class {
     const manager = this.manager;
     manager?.sounds?.dispose();
     manager?.previews?.dispose();
+    manager?.viewers?.dispose();
     if (manager) disposeSettingsDialogs(manager);
     this.manager = void 0;
     this.integration?.stop();

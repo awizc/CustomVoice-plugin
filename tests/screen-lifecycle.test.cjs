@@ -7,7 +7,7 @@ const { EventEmitter } = require('node:events');
 const source = fs.readFileSync(path.join(__dirname, '../CustomVoice.plugin.js'),'utf8');
 const cut = (start,end) => source.slice(source.indexOf(start),source.indexOf(end,source.indexOf(start)));
 const Track={Source:{ScreenShare:'screen',ScreenShareAudio:'screen-audio',Microphone:'mic'},Kind:{Audio:'audio',Video:'video'}};
-const RoomEvent={TrackUnpublished:'unpublished',TrackPublished:'published',ParticipantDisconnected:'disconnected',LocalTrackUnpublished:'local-unpublished'};
+const RoomEvent={TrackUnpublished:'unpublished',TrackPublished:'published',TrackUnsubscribed:'unsubscribed',ParticipantDisconnected:'disconnected',LocalTrackUnpublished:'local-unpublished'};
 function api() {
   const context=vm.createContext({Track,RoomEvent,defaults:{},crypto:require('node:crypto').webcrypto,customVoiceLog(){},setTimeout,clearTimeout,setInterval,clearInterval,DOMException,AbortController});
   vm.runInContext(cut('var VoiceClient = class','function base64url3(')+cut('var Store = class','function loadSettings('),context);
@@ -23,6 +23,53 @@ function fixture() {
   client.room=room;client.activeShare={fps:144};client.command=async(...args)=>commands.push(args);
   return {context,client,room,pubs,tracks,captures,stops,unpublished,commands};
 }
+
+function recoveryFixture() {
+  const f=fixture(), timers=new Set(), subscriptions=[];let time=100000;
+  f.context.setTimeout=callback=>{timers.add(callback);return callback;};f.context.clearTimeout=callback=>timers.delete(callback);
+  f.context.Date=class extends Date{static now(){return time;}};
+  const publication={trackSid:'remote-sid',source:'screen',setSubscribed:value=>subscriptions.push(['video',value])};
+  const audio={source:'screen-audio',setSubscribed:value=>subscriptions.push(['audio',value])};
+  const participant={identity:'peer',trackPublications:new Map([['video',publication],['audio',audio]]),getTrackPublication:()=>participant.publication,publication};
+  f.room.remoteParticipants.set('peer',participant);f.client.watching.add('peer');
+  return {...f,timers,subscriptions,participant,publication,advance(ms){time+=ms;},
+    unsubscribed(){f.room.emit(RoomEvent.TrackUnsubscribed,{},publication,participant);},
+    fallback(){for(const callback of [...timers])callback();}};
+}
+
+test('receiver recovery waits for video unsubscribe, coalesces requests and leaves audio and viewing state intact',async()=>{
+  const f=recoveryFixture();const first=f.client.recoverScreenSubscription('peer','remote-sid'),second=f.client.recoverScreenSubscription('peer','remote-sid');
+  assert.equal(first,second);assert.deepEqual(f.subscriptions,[['video',false]]);
+  f.unsubscribed();assert.equal(await first,true);assert.deepEqual(f.subscriptions,[['video',false],['video',true]]);
+  assert.equal(f.client.watching.has('peer'),true);assert.equal(f.timers.size,0);assert.equal(f.room.listenerCount(RoomEvent.TrackUnsubscribed),0);
+});
+
+test('stopping viewing cancels delayed resubscription, and a replaced broadcast cannot be re-enabled',async()=>{
+  const f=recoveryFixture(), pending=f.client.recoverScreenSubscription('peer','remote-sid');
+  f.client.watchScreen('peer',false);f.fallback();assert.equal(await pending,false);
+  assert.equal(f.subscriptions.some(([kind,on])=>kind==='video'&&on),false);
+  const g=recoveryFixture(), old=g.client.recoverScreenSubscription('peer','remote-sid');
+  g.participant.publication={trackSid:'replacement'};g.fallback();assert.equal(await old,false);
+  assert.deepEqual(g.subscriptions,[['video',false]]);
+});
+
+test('receiver recovery has a timeout fallback, cooldown and bounded attempts',async()=>{
+  const f=recoveryFixture();
+  for(let attempt=0;attempt<3;attempt++){
+    const work=f.client.recoverScreenSubscription('peer','remote-sid');f.fallback();assert.equal(await work,true);
+    assert.equal(await f.client.recoverScreenSubscription('peer','remote-sid'),false);
+    f.advance(16000);
+  }
+  assert.equal(await f.client.recoverScreenSubscription('peer','remote-sid'),false);assert.equal(f.subscriptions.length,6);
+  f.advance(16000);const next=f.client.recoverScreenSubscription('peer','remote-sid');f.fallback();assert.equal(await next,true);
+});
+
+test('leaving a room disposes pending receiver recovery without re-enabling video',async()=>{
+  const f=recoveryFixture();f.room.disconnect=async()=>{};
+  const pending=f.client.recoverScreenSubscription('peer','remote-sid');await f.client.releaseMedia();f.fallback();
+  assert.equal(await pending,false);assert.equal(f.timers.size,0);assert.equal(f.client.screenRecoveries.size,0);
+  assert.deepEqual(f.subscriptions,[['video',false]]);
+});
 test('stop notification and both capture tracks finish even when video unpublishing fails',async()=>{
   const f=fixture();
   f.room.localParticipant.unpublishTrack=async track=>{f.unpublished.push(track.source);if(track.source==='screen')throw Error('renegotiation failed');};
@@ -102,12 +149,34 @@ test('a failed replacement audio picker preserves the pending silent-state retry
 test('audio settings reflect locally stopped capture when server synchronization fails',async()=>{
   const f=fixture();
   vm.runInContext('var Manager = class {'+cut('  changeShareAudio(audio)','  watch(identity2,')+'};',f.context);
-  const manager=new f.context.Manager(),store=new f.context.Store();store.set({settings:{shareAudio:true,shareFps:144}});
+  const manager=new f.context.Manager(),store=new f.context.Store();store.set({sharing:true,settings:{shareAudio:true,shareFps:144}});
   manager.serial=fn=>fn();manager.store=store;manager.client=f.client;let saved;
   manager.save=settings=>{saved=settings;};f.client.command=async()=>{throw Error('offline');};
   await assert.rejects(manager.changeShareAudio(false));
   assert.equal(store.get().settings.shareAudio,false);assert.equal(saved.shareAudio,false);
   assert.equal(saved.shareFps,144);
+});
+
+test('a failed audio retry preserves the requested next-broadcast preference while actual capture stays off',async()=>{
+  const f=fixture();f.pubs.delete('screen-audio');
+  vm.runInContext('var Manager = class {'+cut('  changeShareAudio(audio)','  watch(identity2,')+'};',f.context);
+  const manager=new f.context.Manager(),store=new f.context.Store();store.set({sharing:true,settings:{shareAudio:false}});
+  manager.store=store;manager.client=f.client;manager.serial=fn=>fn();manager.save=()=>{};
+  f.client.options.screenCapture={captureAudio:async()=>{throw Error('capture unavailable');}};
+  await assert.rejects(manager.changeShareAudio(true),/capture unavailable/);
+  assert.equal(store.get().settings.shareAudio,true);assert.equal(f.client.screenShareAudioEnabled,false);
+});
+
+test('video-only fallback retains the selected audio preference, including an explicit picker opt-out',async()=>{
+  const f=fixture();
+  vm.runInContext('var Manager = class {'+cut('  startSharing()','  async changeShareBorder(')+'};',f.context);
+  for (const audioRequested of [true,false]) {
+    const manager=new f.context.Manager(),store=new f.context.Store();store.set({settings:{shareAudio:true,shareQuality:'720p',shareFps:30}});
+    manager.store=store;manager.client=f.client;manager.serial=fn=>Promise.resolve().then(fn);manager.save=()=>{};
+    f.client.room.localParticipant.isScreenShareEnabled=true;f.pubs.delete('screen-audio');
+    f.client.startScreenShare=async()=>{f.client.activeShare={quality:'720p',fps:30,audioRequested};};
+    await manager.startSharing();assert.equal(store.get().settings.shareAudio,audioRequested);assert.equal(f.client.screenShareAudioEnabled,false);
+  }
 });
 
 test('late failed start only cleans its own tracks while the newer broadcast starts normally',async()=>{

@@ -1,5 +1,10 @@
 Runtime components shipped with CustomVoice native capture:
 
+OBS Studio 32.0.4 graphics-hook, inject-helper and get-graphics-offsets
+(OBS contributors), GNU GPL v2 or later. The unmodified release binaries,
+COPYING.txt, NOTICE.txt and complete corresponding source archive are included
+in game-hook/. No OBS application installation is required.
+
 Vortice.Windows / Direct3D11, DirectX, DXGI 3.8.3 (Amer Koleci and contributors)
 Vortice.Mathematics 2.1.0 (Amer Koleci and contributors)
 SharpGen.Runtime and SharpGen.Runtime.COM (SharpGenTools contributors)

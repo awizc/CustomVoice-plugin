@@ -1,0 +1,34 @@
+[
+  {
+    "name": "COPYING.txt",
+    "sha256": "8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643"
+  },
+  {
+    "name": "get-graphics-offsets32.exe",
+    "sha256": "ae849209dcecfa302f453ffe3fc48e62d11f02356da4bfd8ebbce4afdb0958c0"
+  },
+  {
+    "name": "get-graphics-offsets64.exe",
+    "sha256": "a46967f33c2843e6bd486bc0c4f2a5cd590ee75e1a6b68c819bb00d9aae8cf09"
+  },
+  {
+    "name": "graphics-hook32.dll",
+    "sha256": "64f1dc6b6562d838a240d1c21e74d4159d8e56d2a773b91d144e53da6c31530e"
+  },
+  {
+    "name": "graphics-hook64.dll",
+    "sha256": "db8d7ea45c7d29d02740ef5ca8ec3d957dcbf8a0d4082c0e051f8165ac392e56"
+  },
+  {
+    "name": "inject-helper32.exe",
+    "sha256": "43a0f8e5644d1dbd9a436045368a9f90e6348a273af8923060a542d509cf89de"
+  },
+  {
+    "name": "inject-helper64.exe",
+    "sha256": "2d8a54c3155a4f97b00d03706e189aa41440ed1afd9c721b72546e614046e857"
+  },
+  {
+    "name": "OBS-Studio-32.0.4-Sources.tar.gz",
+    "sha256": "d9e62ea24305fbfe14c69a6422de1525fe84da232df2cc0d7e4601a840bdbba8"
+  }
+]

@@ -52,7 +52,7 @@ function install({ allowTest = false } = {}) {
       frame = imported.getVideoFrame();
       // Transfer the GPU VideoFrame across Electron's isolated-world boundary;
       // contextBridge never exposes require, process, shared handles or Node APIs.
-      window.postMessage({ type: 'customvoice-native-frame-v2', session: message.session, sequence: message.sequence, revision: message.revision, preImportDropped: delivery?.dropped ?? 0, frame }, targetOrigin, [frame]);
+      window.postMessage({ type: 'customvoice-native-frame-v2', session: message.session, sequence: message.sequence, revision: message.revision, sourceAvailable: message.sourceAvailable, holdingFrame: message.holdingFrame, preImportDropped: delivery?.dropped ?? 0, frame }, targetOrigin, [frame]);
     } catch (error) {
       forget(message.session);
       status({ session: message.session, event: 'error', message: error.message });
@@ -77,7 +77,8 @@ function install({ allowTest = false } = {}) {
     deliver(message);
   });
   contextBridge.exposeInMainWorld('CustomVoiceNative', {
-    protocol: 2, version: '1.1.6', available: Boolean(textures?.importSharedTexture),
+    protocol: 2, version: '1.1.12', windowCaptureAuto: true, available: Boolean(textures?.importSharedTexture),
+    listWindowSources: () => ipcRenderer.invoke(prefix + 'window-sources'),
     async audioStart(source){const info=await ipcRenderer.invoke(prefix+'audio-start',source);audioSessions.add(info.session);return info;},
     audioActivate:(id,transport=1)=>ipcRenderer.invoke(prefix+'audio-activate',id,transport),
     audioConsumed:(id,sequence)=>{if(audioSessions.has(id))ipcRenderer.send(prefix+'audio-consumed',id,sequence);},
@@ -96,7 +97,7 @@ function install({ allowTest = false } = {}) {
         void ipcRenderer.invoke(prefix + 'stop', info.session).catch(() => {});
         throw new Error('Capture startup was superseded.');
       }
-      active.add(info.session); return { ...info, preloadVersion: '1.1.6' };
+      active.add(info.session); return { ...info, preloadVersion: '1.1.12' };
     },
     activate: (id, boundedDelivery = false) => {
       // Opt in so older renderer bundles remain compatible with this preload.

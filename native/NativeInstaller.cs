@@ -101,8 +101,10 @@ internal static class NativeInstaller
                     throw new InvalidDataException($"파일이 누락되었거나 손상되었습니다: {name}. 배포 압축 파일을 다시 풀어 주세요.");
                 if (!source.Equals(target, StringComparison.OrdinalIgnoreCase)) copies.Add((source, target));
             }
-            foreach (string required in new[] { "CustomVoice.Capture.exe", "CustomVoice.Capture.dll", "CustomVoice.Capture.runtimeconfig.json", "host-main.cjs", "host-preload.cjs", "audio-main.cjs", "github-main.cjs", "native-version.json", "coreclr.dll", "hostfxr.dll" })
+            foreach (string required in new[] { "CustomVoice.Capture.exe", "CustomVoice.Capture.dll", "CustomVoice.Capture.runtimeconfig.json", "host-main.cjs", "host-preload.cjs", "audio-main.cjs", "github-main.cjs", "window-sources-main.cjs", "native-version.json", "coreclr.dll", "hostfxr.dll" })
                 if (!names.Contains(required)) throw new InvalidDataException($"배포 폴더에 필요한 파일이 없습니다: {required}");
+            foreach (string required in new[] { "graphics-hook32.dll", "graphics-hook64.dll", "inject-helper32.exe", "inject-helper64.exe", "get-graphics-offsets32.exe", "get-graphics-offsets64.exe", "COPYING.txt", "NOTICE.txt", "OBS-Studio-32.0.4-Sources.tar.gz" })
+                if (!names.Contains("game-hook/" + required)) throw new InvalidDataException($"게임 캡처 구성요소가 없습니다: {required}");
             string targetManifest = Path.Combine(nativeDirectory, "manifest.json");
             if (!manifestPath.Equals(targetManifest, StringComparison.OrdinalIgnoreCase)) copies.Add((manifestPath, targetManifest));
             string plugin = Path.GetFullPath(Path.Combine(payloadDirectory, "..", "CustomVoice.plugin.js"));

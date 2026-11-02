@@ -24,7 +24,7 @@ static JsonObject Header(byte[] archive) => JsonNode.Parse(Encoding.UTF8.GetStri
 static byte[] Content(byte[] archive, JsonNode entry) => archive.AsSpan(8 + BitConverter.ToInt32(archive, 4) + int.Parse(entry["offset"]!.GetValue<string>()), entry["size"]!.GetValue<int>()).ToArray();
 static void Manifest(string payload)
 {
-    var items = Directory.GetFiles(payload).Where(file => Path.GetFileName(file) != "manifest.json").Select(file => new { name = Path.GetFileName(file), sha256 = Hash(File.ReadAllBytes(file)) }).ToArray();
+    var items = Directory.GetFiles(payload, "*", SearchOption.AllDirectories).Where(file => Path.GetFileName(file) != "manifest.json").Select(file => new { name = Path.GetRelativePath(payload, file).Replace('\\', '/'), sha256 = Hash(File.ReadAllBytes(file)) }).ToArray();
     File.WriteAllText(Path.Combine(payload, "manifest.json"), JsonSerializer.Serialize(items));
 }
 
@@ -57,12 +57,28 @@ try
     string payload = Path.Combine(root, "package", "CustomVoice.native"), plugins = Path.Combine(root, "BetterDiscord", "plugins"), data = Path.Combine(root, "BetterDiscord", "data");
     Directory.CreateDirectory(payload); Directory.CreateDirectory(plugins); Directory.CreateDirectory(data);
     string archive = Path.Combine(data, "betterdiscord.asar"); File.WriteAllBytes(archive, original);
-    foreach (string name in new[] { "CustomVoice.Capture.exe", "CustomVoice.Capture.dll", "CustomVoice.Capture.runtimeconfig.json", "host-main.cjs", "host-preload.cjs", "coreclr.dll", "hostfxr.dll" }) File.WriteAllText(Path.Combine(payload, name), "fixture:" + name);
+    foreach (string name in new[] { "CustomVoice.Capture.exe", "CustomVoice.Capture.dll", "CustomVoice.Capture.runtimeconfig.json", "host-main.cjs", "host-preload.cjs", "audio-main.cjs", "github-main.cjs", "window-sources-main.cjs", "native-version.json", "coreclr.dll", "hostfxr.dll" }) File.WriteAllText(Path.Combine(payload, name), "fixture:" + name);
+    Directory.CreateDirectory(Path.Combine(payload, "game-hook"));
+    foreach (string name in new[] { "graphics-hook32.dll", "graphics-hook64.dll", "inject-helper32.exe", "inject-helper64.exe", "get-graphics-offsets32.exe", "get-graphics-offsets64.exe", "COPYING.txt", "NOTICE.txt", "OBS-Studio-32.0.4-Sources.tar.gz" }) File.WriteAllText(Path.Combine(payload, "game-hook", name), "fixture:" + name);
     File.WriteAllText(Path.Combine(root, "package", "CustomVoice.plugin.js"), "new plugin");
     File.WriteAllText(Path.Combine(plugins, "CustomVoice.plugin.js"), "old plugin");
     File.WriteAllText(Path.Combine(plugins, "CustomVoice.config.json"), "keep settings");
     Manifest(payload);
+    string manifestPath = Path.Combine(payload, "manifest.json"), fullManifest = File.ReadAllText(manifestPath);
+    var incomplete = JsonNode.Parse(fullManifest)!.AsArray();
+    incomplete.Remove(incomplete.First(item => item!["name"]!.GetValue<string>() == "window-sources-main.cjs"));
+    File.WriteAllText(manifestPath, incomplete.ToJsonString());
+    try { NativeInstaller.Install(payload, plugins); throw new Exception("Accepted missing window source module"); } catch (InvalidDataException) { }
+    Check(File.ReadAllBytes(archive).SequenceEqual(original), "Incomplete package modified the archive");
+    File.WriteAllText(manifestPath, fullManifest);
+    incomplete = JsonNode.Parse(fullManifest)!.AsArray();
+    incomplete.Remove(incomplete.First(item => item!["name"]!.GetValue<string>() == "game-hook/graphics-hook32.dll"));
+    File.WriteAllText(manifestPath, incomplete.ToJsonString());
+    try { NativeInstaller.Install(payload, plugins); throw new Exception("Accepted missing 32-bit game hook"); } catch (InvalidDataException) { }
+    Check(File.ReadAllBytes(archive).SequenceEqual(original), "Incomplete game capture package modified the archive");
+    File.WriteAllText(manifestPath, fullManifest);
     NativeInstaller.Install(payload, plugins);
+    Check(File.Exists(Path.Combine(plugins, "CustomVoice.native", "game-hook", "graphics-hook32.dll")), "Nested game capture files were not installed");
     Check(File.ReadAllText(Path.Combine(plugins, "CustomVoice.plugin.js")) == "new plugin", "Plugin was not copied");
     Check(File.ReadAllText(Path.Combine(plugins, "CustomVoice.config.json")) == "keep settings", "Settings were changed");
     Check(File.ReadAllBytes(archive).SequenceEqual(NativeInstaller.PatchArchive(original, Path.Combine(plugins, "CustomVoice.native"))), "Wrong install destination");

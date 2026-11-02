@@ -5,10 +5,11 @@
 const sessions = new Set();
 // Preserve the requested profile, regulating work offered to a busy encoder.
 function createCadenceController(target) {
-  let rate = target, overloaded = 0, healthy = 0, previousTime;
+  let rate = target, overloaded = 0, healthy = 0, previousTime, warmup = 0;
   return {
     get fps() { return rate; },
-    reset(next) { target = rate = next; overloaded = healthy = 0; previousTime = undefined; },
+    reset(next) { target = rate = next; overloaded = healthy = warmup = 0; previousTime = undefined; },
+    recover() { rate = target; overloaded = healthy = 0; warmup = 2; },
     update(stats, native = {}) {
       const timestamp = stats?.sample?.timestamp;
       if (Number.isFinite(timestamp)) {
@@ -16,7 +17,11 @@ function createCadenceController(target) {
         previousTime = timestamp;
       }
       const sent = stats?.encodeFps, cost = stats?.processingMs;
+      // Missing game frames and the low-rate placeholder are source waits,
+      // not encoder overload. Discard feedback spanning a capture restart.
+      if (native.sourceAvailable === false) { rate = target; overloaded = healthy = 0; warmup = 2; return rate; }
       if (!Number.isFinite(sent) || sent < 0) return rate;
+      if (warmup > 0) { warmup--; return rate; }
       const offered = Math.min(rate, Number.isFinite(stats.captureFps) ? Math.max(stats.captureFps, rate * 0.5) : rate);
       const busy = native.backpressureFps > rate * 0.1 || native.preImportDropFps > rate * 0.1;
       const stalled = sent === 0 && stats.captureFps > 1;
@@ -28,7 +33,7 @@ function createCadenceController(target) {
       const captureReady = !Number.isFinite(native.outputWorkMs) || native.outputWorkMs < 750 / rate;
       healthy = !slow && !busy && captureReady && sent >= rate * 0.95 && (hardware || Number.isFinite(cost) && cost < 750 / rate) ? healthy + 1 : 0;
       if (overloaded >= 2) {
-        const encoderCapacity = !slowEncoder ? rate : stalled ? rate * 0.5 : Math.min(sent * 1.1, !hardware && Number.isFinite(cost) && cost > 0 ? 900 / cost : rate);
+        const encoderCapacity = !slowEncoder ? rate : sent === 0 ? rate * 0.5 : Math.min(sent * 1.1, !hardware && Number.isFinite(cost) && cost > 0 ? 900 / cost : rate);
         // Unlike parallel hardware encoding, this native worker is serial:
         // reserve some time when conversion/submission itself is the bottleneck.
         const capacity = Math.min(encoderCapacity, slowCapture ? 900 / native.outputWorkMs : rate);
@@ -62,12 +67,54 @@ function createHandoffWindow() {
   };
 }
 function available() { return globalThis.CustomVoiceNative?.protocol === 2 && globalThis.CustomVoiceNative.available && typeof MediaStreamTrackGenerator === 'function'; }
+async function listSources(discordCapture, signal) {
+  if (signal.aborted) throw new DOMException('Capture cancelled', 'AbortError');
+  const native = globalThis.CustomVoiceNative;
+  const hasNativeList = typeof native?.listWindowSources === 'function';
+  const [desktop, windows] = await Promise.allSettled([
+    Promise.resolve().then(() => discordCapture.getDesktopCaptureSources({
+      types: ['screen', 'window'], thumbnailSize: { width: 640, height: 360 }, fetchWindowIcons: true
+    })).then(sources => { if (!Array.isArray(sources)) throw Error('화면 목록 응답이 올바르지 않습니다.'); return sources; }),
+    Promise.resolve().then(() => hasNativeList ? native.listWindowSources() : [])
+      .then(sources => { if (!Array.isArray(sources)) throw Error('창 목록 응답이 올바르지 않습니다.'); return sources; })
+  ]);
+  if (signal.aborted) throw new DOMException('Capture cancelled', 'AbortError');
+  const result = [], keys = new Map();
+  function add(source, fromNative) {
+    if (typeof source?.id !== 'string' || typeof source.name !== 'string' || !source.name.trim()) return;
+    const match = /^(screen|window):(\d+):(\d+)$/.exec(source.id);
+    if (!match || fromNative && match[1] !== 'window' || match[1] === 'window' && BigInt(match[2]) === 0n) return;
+    const key = match[1] + ':' + BigInt(match[2]);
+    if (keys.has(key)) {
+      if (fromNative) result[keys.get(key)].minimized = source.minimized === true;
+      return;
+    }
+    keys.set(key, result.length);
+    result.push(fromNative
+      ? { id: source.id, name: source.name, minimized: source.minimized === true, nativeOnly: true }
+      : { ...source });
+  }
+  if (desktop.status === 'fulfilled') for (const source of desktop.value) add(source, false);
+  if (windows.status === 'fulfilled') for (const source of windows.value) add(source, true);
+  if (typeof customVoiceLog === 'function') {
+    for (const [name, outcome] of [['Discord', desktop], ['Windows', windows]])
+      if (outcome.status === 'rejected') customVoiceLog('warn', '[CustomVoice] '+name+' source list failed', outcome.reason);
+    customVoiceLog('info', '[CustomVoice] Share source list', {
+      discord: desktop.status === 'fulfilled' ? desktop.value.length : 0,
+      native: windows.status === 'fulfilled' ? windows.value.length : 0,
+      addedWindows: result.filter(source => source.nativeOnly).length, total: result.length, nativeListAvailable: hasNativeList
+    });
+  }
+  if (desktop.status === 'rejected' && !result.length) throw desktop.reason;
+  return result;
+}
 async function start(sourceId, fps, quality, signal, showBorder = true) {
   if (signal.aborted) throw new DOMException('Capture cancelled', 'AbortError');
   const bridge = globalThis.CustomVoiceNative;
   if (bridge?.protocol !== 2) throw new Error('네이티브 시작 연결이 로드되지 않았습니다. 설치 상태를 확인한 뒤 Discord를 완전히 종료하고 다시 실행해 주세요.');
   if (!bridge.available) throw new Error('현재 Discord에서 네이티브 GPU 프레임 연결 API를 사용할 수 없습니다.');
   if (typeof MediaStreamTrackGenerator !== 'function') throw new Error('현재 Discord에서 생성형 비디오 트랙 API를 사용할 수 없습니다.');
+  if (sourceId.startsWith('window:') && bridge.windowCaptureAuto !== true) throw new Error('전체 화면 자동 감지와 제목 표시줄 제외에는 native 1.1.7 이상 설치 및 Discord 완전 재시작이 필요합니다.');
   const track = new MediaStreamTrackGenerator({ kind: 'video' });
   const writer = track.writable.getWriter(), originalStop = track.stop.bind(track), originalSettings = track.getSettings.bind(track);
   let info, diagnostics, lastNativeSample, closed = false, writing = false, received = false, readyResolve, readyReject;
@@ -110,18 +157,30 @@ async function start(sourceId, fps, quality, signal, showBorder = true) {
     info = { ...info, ...state };
     if (!closed) track.dispatchEvent(new Event('customvoiceborderchange'));
   }
+  function recoverCadence() {
+    cadence.recover(); lastPaceAt = -Infinity; lastPaceRate = undefined;
+    lastNativeSample = undefined; diagnostics = undefined;
+    clearTimeout(frameTimer); frameTimer = undefined;
+    control.updateEncoderStats(); drain();
+  }
+  function sourceState(available) {
+    if (typeof available !== 'boolean' || info.sourceAvailable === available) return;
+    info = { ...info, sourceAvailable: available };
+    recoverCadence();
+    if (typeof customVoiceLog === 'function') customVoiceLog('info', '[CustomVoice] Capture source', { available, width: info.width, height: info.height, backend: info.backend });
+  }
   const control = {
-    track, backend: 'WGC-D3D11 GPU', get metadata() { return info; },
+    track, get backend() { return info?.backend === 'GAME-HOOK-D3D11' ? '게임 캡처 · GPU' : info?.backend === 'GAME-HOOK-MEMORY' ? '게임 캡처 · 호환 모드' : info?.backend === 'DXGI-D3D11' ? 'DXGI-D3D11 GPU (전체 화면)' : 'WGC-D3D11 GPU'; }, get metadata() { return info; },
     get diagnostics() {
       const time = now();
-      return { ...diagnostics, skippedRepeats, replacedFrames, preImportDropped, boundedDelivery, pacingFps: cadence.fps, nativePacing: nativePacing(), encoderPressured: cadence.fps < (info?.fps ?? fps) - 0.5,
+      return { ...diagnostics, sourceAvailable: info?.sourceAvailable, holdingFrame: info?.holdingFrame, skippedRepeats, replacedFrames, preImportDropped, boundedDelivery, pacingFps: cadence.fps, nativePacing: nativePacing(), encoderPressured: cadence.fps < (info?.fps ?? fps) - 0.5,
         ...handoffWindow.snapshot(time), handoffAgeMs: !closed && Number.isFinite(lastDelivered) ? Math.max(0, time - lastDelivered) : undefined,
         writerPendingMs: !closed && writing ? Math.max(0, time - lastWriteStarted) : 0,
         nativeSampleAgeMs: Number.isFinite(nativeSampleAt) ? Math.max(0, time - nativeSampleAt) : undefined };
     },
     updateEncoderStats(stats) {
       if (closed) return;
-      const before = cadence.fps, rate = cadence.update(stats, now() - nativeSampleAt <= 6000 ? diagnostics : undefined);
+      const before = cadence.fps, rate = cadence.update(stats, { ...(now() - nativeSampleAt <= 6000 ? diagnostics : undefined), sourceAvailable: info?.sourceAvailable });
       if (nativePacing() && (lastPaceRate !== rate || now() - lastPaceAt >= 3000)) {
         try { bridge.pace(info.session, rate); lastPaceRate = rate; lastPaceAt = now(); }
         catch (error) {
@@ -165,16 +224,27 @@ async function start(sourceId, fps, quality, signal, showBorder = true) {
     const data = event.data;
     const origin = location.protocol === 'file:' ? 'null' : location.origin;
     if (event.source !== window || event.origin !== origin || !info || data?.session !== info.session) return;
+    if (typeof data.holdingFrame === 'boolean') info = { ...info, holdingFrame: data.holdingFrame };
     if (data.type === 'customvoice-native-status-v2') {
       if (data.event === 'error') fail(new Error(data.message));
-      else if (data.event === 'resized') info = { ...info, ...data };
+      else if (data.event === 'resized') { info = { ...info, ...data }; recoverCadence(); }
+      else if (data.event === 'source-state') sourceState(data.sourceAvailable);
+      else if (data.event === 'capture-mode') {
+        info = { ...info, ...data };
+        recoverCadence();
+        if (typeof customVoiceLog === 'function') customVoiceLog('info', '[CustomVoice] Automatic capture mode', { backend: data.backend, windowClientOnly: info.windowClientOnly });
+      } else if (data.event === 'capture-warning') {
+        if (typeof customVoiceLog === 'function') customVoiceLog('warn', '[CustomVoice] Fullscreen capture', data.message);
+        globalThis.BdApi?.UI?.showToast?.(data.message, { type: 'warning' });
+      }
       else if (data.event === 'stats') {
+        sourceState(data.sourceAvailable);
         nativeSampleAt = now();
         if (lastNativeSample && data.elapsedMs > lastNativeSample.elapsedMs) {
           const seconds = (data.elapsedMs - lastNativeSample.elapsedMs) / 1000;
           const rate = key => Number.isFinite(data[key]) && Number.isFinite(lastNativeSample[key]) && data[key] >= lastNativeSample[key] ? (data[key] - lastNativeSample[key]) / seconds : undefined;
           const attempts = rate('outputAttempts'), work = rate('outputWorkUs');
-          diagnostics = { sourceFps: rate('captured'), outputFps: rate('frames'), repeatedFps: rate('repeated'), backpressureFps: rate('dropped'), conversionFps: rate('conversions'), gpuContentionsFps: rate('gpuContentions'), nativePacingFps: data.pacingFps,
+          diagnostics = { sourceFps: rate('captured'), outputFps: rate('frames'), repeatedFps: rate('repeated'), backpressureFps: rate('dropped'), conversionFps: rate('conversions'), gpuContentionsFps: rate('gpuContentions'), nativePacingFps: data.pacingFps, sourceAgeMs: data.sourceAgeMs, captureMode: data.backend,
             preImportDropFps: Math.max(0, preImportDropped - previousImportDropped) / seconds,
             outputWorkMs: attempts > 0 && Number.isFinite(work) ? work / attempts / 1000 : undefined, outputOverrunFps: rate('outputOverruns') };
         }
@@ -184,6 +254,7 @@ async function start(sourceId, fps, quality, signal, showBorder = true) {
       return;
     }
     if (data.type !== 'customvoice-native-frame-v2' || !data.frame) return;
+    sourceState(data.sourceAvailable);
     if (Number.isSafeInteger(data.preImportDropped)) preImportDropped = Math.max(preImportDropped, data.preImportDropped);
     const frame = data.frame;
     if (closed) { frame.close(); return; }
@@ -225,6 +296,7 @@ async function start(sourceId, fps, quality, signal, showBorder = true) {
   window.addEventListener('message', message); signal.addEventListener('abort', abort, { once: true });
   void (async () => {
     info = await bridge.start(sourceId, fps, quality);
+    if (sourceId.startsWith('window:') && info.windowClientOnly !== true) throw new Error('native 파일의 버전이 섞여 있습니다. 최신 전체 ZIP을 다시 설치해 주세요.');
     if (closed || signal.aborted) { await bridge.stop(info.session); abort(); }
     else {
       await bridge.activate(info.session, boundedDelivery);
@@ -238,4 +310,4 @@ async function start(sourceId, fps, quality, signal, showBorder = true) {
   return ready;
 }
 function stopAll() { for (const session of [...sessions]) session.stop(); }
-module.exports = { available, start, stopAll, createCadenceController };
+module.exports = { available, start, stopAll, createCadenceController, listSources };

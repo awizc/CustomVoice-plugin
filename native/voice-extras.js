@@ -1,9 +1,7 @@
-// Bundled UI services. Notification tones are generated locally; no sound assets.
+// Bundled UI services. Use the client's own sound engine and bundled assets.
 var VoiceSounds = class {
   constructor(manager) {
-    this.manager=manager;this.previous=manager.store.get();this.channel=undefined;this.closed=false;this.last=new Map();
-    this.unlock=()=>{if(this.closed)return;try{this.context??=new AudioContext({latencyHint:'interactive'});void this.context.resume().catch(()=>{});}catch{}};
-    window.addEventListener('pointerdown',this.unlock,true);window.addEventListener('keydown',this.unlock,true);
+    this.manager=manager;this.previous=manager.store.get();this.channel=this.previous.connection==='Connected'?this.previous.sessionChannel?.id:undefined;this.closed=false;this.last=new Map();this.active=new Map();
     this.off=watchVoiceState(manager.store,['connection','sessionChannel','participants','muted','deafened','sharing','settings'],()=>this.changed());
   }
   changed() {
@@ -19,26 +17,45 @@ var VoiceSounds = class {
       if(old.deafened!==next.deafened)this.play(next.deafened?'deafen':'undeafen');
       else if(old.muted!==next.muted&&performance.now()-Math.max(this.last.get('deafen')??-Infinity,this.last.get('undeafen')??-Infinity)>400)this.play(next.muted?'mute':'unmute');
     }
-    if(old.sharing!==next.sharing)this.play(next.sharing?'streamStart':'streamStop');
+    if(old.sharing!==next.sharing&&connected)this.play(next.sharing?'streamStart':'streamStop');
+  }
+  resolve() {
+    if(this.engine)return;
+    // Retry discovery if Discord has not loaded its sound module yet.
+    const now=performance.now();if(this.lookupAt!==undefined&&now-this.lookupAt<5000)return;this.lookupAt=now;
+    const webpack=globalThis.BdApi?.Webpack;
+    try{this.engine=webpack?.getByKeys?.('createSound');}catch{}
+    try{this.parser??=webpack?.getModule?.(value=>{
+      if(typeof value!=='function'||typeof value.keys!=='function')return false;
+      try{const keys=value.keys();return keys.includes('./user_join.mp3')&&keys.includes('./mute.mp3');}catch{return false;}
+    },{searchExports:true});}catch{}
   }
   play(kind) {
     const settings=this.manager.store.get().settings;
     if(this.closed||!settings.soundEffects)return;
     const now=performance.now();if(now-(this.last.get(kind)??-Infinity)<180)return;this.last.set(kind,now);
-    this.unlock();const context=this.context;if(context?.state!=='running')return;
-    const patterns={join:[660,880],leave:[660,440],mute:[440,330],unmute:[440,660],deafen:[330,262,220],undeafen:[330,440,660],streamStart:[523,659,784],streamStop:[659,523,392]};
-    const volume=Math.max(0,Math.min(1,Number(settings.soundVolume)||0))*0.12;
-    if(!volume)return;
-    if(context.setSinkId&&this.output!==settings.outputDevice){this.output=settings.outputDevice;void context.setSinkId(this.output||'default').catch(()=>{});}
-    patterns[kind].forEach((frequency,index)=>{
-      const oscillator=context.createOscillator(),gain=context.createGain(),start=context.currentTime+index*0.075;
-      oscillator.type='sine';oscillator.frequency.value=frequency;
-      gain.gain.setValueAtTime(0,start);gain.gain.linearRampToValueAtTime(volume,start+0.008);gain.gain.exponentialRampToValueAtTime(0.0001,start+0.10);
-      oscillator.connect(gain);gain.connect(context.destination);oscillator.start(start);oscillator.stop(start+0.11);
-      oscillator.onended=()=>{oscillator.disconnect();gain.disconnect();};
-    });
+    const names={join:'user_join',leave:'user_leave',mute:'mute',unmute:'unmute',deafen:'deafen',undeafen:'undeafen',streamStart:'stream_started',streamStop:'stream_ended'};
+    const name=names[kind];if(!name)return;
+    this.resolve();
+    const failed=error=>{if(!this.warned){this.warned=true;customVoiceLog('warn','[CustomVoice] Discord sound unavailable',{name,message:error?.message});}};
+    try{
+      let sound;
+      if(this.engine?.createSound){
+        sound=this.engine.createSound(name);
+        if(typeof sound?.play!=='function')throw Error('Discord sound player is unavailable');
+      }else if(this.parser){
+        const key=`./${name}.mp3`;if(!this.parser.keys().includes(key))throw Error('Discord sound asset is unavailable');
+        const source=this.parser(key);const audio=new Audio(typeof source==='string'?source:source.default);
+        const nativeVolume=globalThis.BdApi?.Webpack?.getStore?.('MediaEngineStore')?.getOutputVolume?.();
+        audio.volume=Number.isFinite(nativeVolume)?Math.max(0,Math.min(1,nativeVolume/100)):1;
+        if(audio.setSinkId)void audio.setSinkId(settings.outputDevice==='default'?'':settings.outputDevice||'').catch(failed);
+        sound={play:()=>audio.play(),stop:()=>{audio.pause();audio.removeAttribute('src');audio.load();}};
+      }else throw Error('Discord sound module has not loaded');
+      const timer=setTimeout(()=>{this.active.delete(sound);try{sound.stop?.();}catch{}},8000);this.active.set(sound,timer);
+      Promise.resolve(sound.play()).catch(failed);
+    }catch(error){failed(error);}
   }
-  dispose(){this.closed=true;this.off();window.removeEventListener('pointerdown',this.unlock,true);window.removeEventListener('keydown',this.unlock,true);void this.context?.close().catch(()=>{});}
+  dispose(){this.closed=true;this.off();for(const [sound,timer] of this.active){clearTimeout(timer);try{sound.stop?.();}catch{}}this.active.clear();}
 };
 
 var BroadcastPreviews = class {
@@ -146,17 +163,38 @@ function BroadcastThumbnail({manager,identity}){
     ?React.createElement('img',{src:preview.image,alt:'방송 미리보기',draggable:false})
     :React.createElement('span',null,preview.error||'방송 미리보기 요청 중…'));
 }
-function BroadcastHover({manager,identity,anchor}){
-  const React=BdApi.React,ref=React.useRef(null);const [ready,setReady]=React.useState(false);
-  React.useEffect(()=>{const timer=setTimeout(()=>setReady(true),250);return()=>clearTimeout(timer);},[identity]);
-  React.useEffect(()=>{if(!ready||!ref.current||!anchor?.isConnected)return;const element=ref.current;const place=()=>{const rect=anchor.getBoundingClientRect();element.style.left=Math.max(8,Math.min(rect.right+10,window.innerWidth-278))+'px';element.style.top=Math.max(8,Math.min(rect.top,window.innerHeight-178))+'px';};element.showPopover?.();place();window.addEventListener('resize',place);return()=>window.removeEventListener('resize',place);},[ready,anchor]);
-  return ready?React.createElement('div',{ref,popover:'manual',role:'tooltip',className:'cv cv-broadcast-hover'},React.createElement(BroadcastThumbnail,{manager,identity})):null;
+function BroadcastHover({manager,identity,anchor,pinned=false,onPin,onClose,onEnter,onLeave}){
+  const React=BdApi.React,ref=React.useRef(null);const [ready,setReady]=React.useState(pinned),[pending,setPending]=React.useState(false);
+  React.useEffect(()=>{if(pinned){setReady(true);return;}const timer=setTimeout(()=>setReady(true),250);return()=>clearTimeout(timer);},[identity,pinned]);
+  React.useEffect(()=>{
+    if(!ready||!ref.current||!anchor?.isConnected)return;
+    const element=ref.current,doc=element.ownerDocument,win=doc.defaultView;
+    const place=()=>{if(!anchor.isConnected){onClose();return;}const rect=anchor.getBoundingClientRect(),size=element.getBoundingClientRect();element.style.left=Math.max(8,Math.min(rect.right+8,win.innerWidth-size.width-8))+'px';element.style.top=Math.max(8,Math.min(rect.top,win.innerHeight-size.height-8))+'px';};
+    const outside=event=>{if(!element.contains(event.target)&&!anchor.contains(event.target))onClose();};
+    const key=event=>{if(event.key==='Escape'){event.preventDefault();event.stopPropagation();onClose();if(pinned)anchor.querySelector('button')?.focus();}};
+    element.showPopover?.();place();
+    if(pinned)element.querySelector('button')?.focus();
+    const observer=new ResizeObserver(place);observer.observe(element);
+    win.addEventListener('resize',place);doc.addEventListener('scroll',place,true);doc.addEventListener('pointerdown',outside,true);doc.addEventListener('keydown',key,true);
+    return()=>{observer.disconnect();win.removeEventListener('resize',place);doc.removeEventListener('scroll',place,true);doc.removeEventListener('pointerdown',outside,true);doc.removeEventListener('keydown',key,true);};
+  },[ready,anchor,pinned,onClose]);
+  if(!ready)return null;
+  const participant=manager.store.get().participants.find(p=>p.mediaIdentity===identity&&p.screenSharing);
+  if(!participant)return null;
+  const self=participant.userId===manager.store.get().user?.id;
+  return React.createElement('div',{ref,popover:'manual',role:'dialog','aria-label':'방송 미리보기',className:'cv cv-broadcast-hover',onPointerEnter:onEnter,onPointerLeave:onLeave,onClick:onPin,onFocus:onPin},
+    React.createElement('div',{className:'cv-preview-heading'},React.createElement('strong',null,'방송 미리보기'),pinned&&React.createElement('button',{type:'button','aria-label':'미리보기 닫기',onClick:event=>{event.stopPropagation();onClose();}},'×')),
+    React.createElement(BroadcastThumbnail,{manager,identity}),
+    React.createElement('button',{type:'button',className:'cv-watch-button',disabled:pending,onClick:event=>{event.stopPropagation();onPin();setPending(true);void manager.watchParticipant(participant).then(onClose).catch(error=>manager.error(error)).finally(()=>setPending(false));}},self?'내 방송 보기':'방송 보기'));
 }
 var customVoiceFeatureCss=`
 .cv-broadcast-thumbnail{width:100%;aspect-ratio:16/9;background:#111318;border-radius:6px;overflow:hidden;display:grid;place-items:center;margin:10px 0;color:var(--text-muted,#aaa);font-size:12px;text-align:center}
 .cv-broadcast-thumbnail img{display:block;width:100%;height:100%;object-fit:contain}
 .cv-broadcast-thumbnail span{padding:12px}
-.cv-broadcast-hover{position:fixed;inset:auto;margin:0;width:270px;padding:7px;border:1px solid #45464b;border-radius:8px;background:#202127;box-shadow:0 8px 24px #0005;pointer-events:none;z-index:2147483647}
+.cv-broadcast-hover{position:fixed;inset:auto;margin:0;width:286px;max-width:calc(100vw - 16px);padding:12px;border:1px solid var(--border-subtle,#ffffff14);border-radius:var(--radius-md,8px);background:var(--background-floating,#111214);box-shadow:var(--elevation-high,0 8px 24px #0005);pointer-events:auto;z-index:2147483647}
+.cv-preview-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;font-size:14px;line-height:20px}
+.cv-preview-heading button{display:grid;place-items:center;width:24px;height:24px;padding:0;font-size:20px;line-height:1;background:transparent}
+.cv-broadcast-hover .cv-watch-button{margin-top:10px}
 .cv-broadcast-hover .cv-broadcast-thumbnail{margin:0}
 .cv-screen .cv-screen-heading{transition:opacity .15s ease,visibility .15s ease}
 .cv-screen:not(.cv-controls-visible):not(:has(:focus-visible)):not(:has(dialog[open])) .cv-screen-heading{opacity:0;visibility:hidden;pointer-events:none}

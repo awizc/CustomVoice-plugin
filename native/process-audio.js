@@ -32,18 +32,18 @@ function createProcessAudioModule(){
     if(!bridge?.audioStart)throw Error('앱별 소리 캡처용 native가 없습니다. 송출자 PC에 최신 전체 ZIP을 설치한 뒤 Discord를 완전히 재시작해 주세요. 시스템 소리로 대체하지 않습니다.');
     if(signal.aborted)throw new DOMException('Capture cancelled','AbortError');
     const context=new AudioContext({sampleRate:48000,latencyHint:'interactive'});
-    let info,node,destination,track,silentSink,closed=false,timer,readyTimer,readyResolve,readyReject;
+    let info,node,destination,track,silentSink,closed=false,timer,readyTimer,recoveryTimer,resuming,readyResolve,readyReject;
     const ready=new Promise((resolve,reject)=>{readyResolve=resolve;readyReject=reject;});ready.catch(()=>{});
     const origin=location.protocol==='file:'?'null':location.origin;
     const stop=()=>{
-      if(closed)return;closed=true;clearTimeout(timer);clearTimeout(readyTimer);readyReject(new DOMException('Capture cancelled','AbortError'));
+      if(closed)return;closed=true;clearTimeout(timer);clearTimeout(readyTimer);clearTimeout(recoveryTimer);readyReject(new DOMException('Capture cancelled','AbortError'));
       signal.removeEventListener('abort',stop);window.removeEventListener('message',message);context.onstatechange=null;
       if(track){track.enabled=false;MediaStreamTrack.prototype.stop.call(track);}
       if(node){node.onprocessorerror=null;node.port.onmessage=null;node.disconnect();node.port.close();}
-      silentSink?.disconnect();void context.close().catch(()=>{});
+      destination?.disconnect();silentSink?.disconnect();void context.close().catch(()=>{});
       if(info)void bridge.audioStop(info.session).catch(()=>{});sessions.delete(stop);
     };
-    const fail=error=>{log('warn','failed',{message:error.message});readyReject(error);stop();track?.dispatchEvent(new Event('ended'));globalThis.BdApi?.UI?.showToast?.(error.message,{type:'warning'});};
+    const fail=error=>{if(closed)return;log('warn','failed',{message:error.message});readyReject(error);stop();track?.dispatchEvent(new Event('ended'));globalThis.BdApi?.UI?.showToast?.(error.message,{type:'warning'});};
     function message(event){
       const data=event.data;
       if(event.source!==window||event.origin!==origin||!info||data?.session!==info.session||closed)return;
@@ -85,7 +85,14 @@ function createProcessAudioModule(){
       info=await bridge.audioStart(source);
       if(closed){await bridge.audioStop(info.session);throw new DOMException('Capture cancelled','AbortError');}
       if(info.sampleRate!==48000||info.channels!==2)throw Error('앱별 오디오 캡처 형식을 지원하지 않습니다.');
-      context.onstatechange=()=>{if(!closed&&context.state!=='running')log('warn','context',{state:context.state});};
+      context.onstatechange=()=>{
+        if(closed||context.state==='running')return;
+        log('warn','context',{state:context.state});
+        if(context.state==='closed'){fail(Error('앱 소리 처리 연결이 종료되었습니다. 공유 대상 소리를 다시 켜 주세요.'));return;}
+        if(resuming)return;
+        recoveryTimer=setTimeout(()=>{if(context.state!=='running')fail(Error('앱 소리 처리가 일시 중지되었습니다. 공유 대상 소리를 다시 켜 주세요.'));},5000);
+        resuming=context.resume().then(()=>{if(context.state==='running')clearTimeout(recoveryTimer);}).catch(fail).finally(()=>{resuming=undefined;});
+      };
       await bridge.audioActivate(info.session,2);
       if(closed)throw new DOMException('Capture cancelled','AbortError');
       log('info','started',{processId:info.processId,windowProcessId:info.windowProcessId,scope:info.scope??'process-tree',sampleRate:info.sampleRate,nativeVersion:bridge.version});
