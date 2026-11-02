@@ -1,8 +1,8 @@
 /**
  * @name CustomVoice
  * @author CustomVoice contributors
- * @version 1.1.21
- * @nativeVersion 1.1.14
+ * @version 1.1.22
+ * @nativeVersion 1.1.15
  * @description Independent LiveKit voice channels inside Discord.
  * @source https://github.com/awizc/CustomVoice-plugin
  * @updateUrl https://raw.githubusercontent.com/awizc/CustomVoice-plugin/main/CustomVoice.plugin.js
@@ -32235,7 +32235,7 @@ function createNativeCaptureModule() {
   // Preserve the requested profile, regulating work offered to a busy encoder.
   function createCadenceController(target) {
     let rate = target, overloaded = 0, healthy = 0, previousTime, previousId, warmup = 0;
-    let elapsed = 0, stableMs = 0, nextProbeAt = 0, probeBackoff = 15000, probe;
+    let elapsed = 0, stableMs = 0, nextProbeAt = 0, probeBackoff = 15000, probe, ramp = 0, stableRate, adaptationGrace = 0;
     function clearFeedback() { overloaded = healthy = stableMs = 0; probe = undefined; }
     function failProbe() {
       rate = probe.from; clearFeedback();
@@ -32244,9 +32244,13 @@ function createNativeCaptureModule() {
     }
     return {
       get fps() { return rate; },
-      get diagnostics() { return { cadenceState: probe ? 'probing' : elapsed < nextProbeAt ? 'cooldown' : rate < target ? 'limited' : 'target', probeWaitMs: Math.max(0, nextProbeAt - elapsed) }; },
-      reset(next) { target = rate = next; clearFeedback(); warmup = elapsed = nextProbeAt = 0; probeBackoff = 15000; previousTime = previousId = undefined; },
-      recover() { rate = target; clearFeedback(); nextProbeAt = elapsed; probeBackoff = 15000; warmup = 2; },
+      get diagnostics() { return { cadenceState: ramp ? 'warming' : probe ? 'probing' : elapsed < nextProbeAt ? 'cooldown' : rate < target ? 'limited' : 'target', probeWaitMs: Math.max(0, nextProbeAt - elapsed) }; },
+      reset(next) { target = rate = next; clearFeedback(); warmup = ramp = elapsed = nextProbeAt = adaptationGrace = 0; stableRate = undefined; probeBackoff = 15000; previousTime = previousId = undefined; },
+      recover() {
+        clearFeedback(); nextProbeAt = elapsed; probeBackoff = 15000; warmup = 2; adaptationGrace = 0;
+        rate = target > 60 ? Math.max(60, Math.min(target * 0.75, stableRate ?? target)) : target;
+        ramp = rate < target ? 2 : 0;
+      },
       update(stats, native = {}) {
         const timestamp = stats?.sample?.timestamp;
         let intervalMs = stats?.intervalMs;
@@ -32261,12 +32265,16 @@ function createNativeCaptureModule() {
         const sent = stats?.encodeFps, cost = stats?.processingMs;
         // Missing game frames and the low-rate placeholder are source waits,
         // not encoder overload. Discard feedback spanning a capture restart.
-        if (native.sourceAvailable === false) { rate = target; clearFeedback(); warmup = 2; return rate; }
+        if (native.sourceAvailable === false) { rate = target; clearFeedback(); ramp = 0; warmup = 2; return rate; }
         if (!Number.isFinite(sent) || sent < 0) return rate;
         if (intervalMs > 6000) { clearFeedback(); warmup = 1; return rate; }
         intervalMs = Number.isFinite(intervalMs) && intervalMs > 0 ? intervalMs : 1000;
         elapsed += intervalMs;
-        if (warmup > 0) { warmup--; return rate; }
+        if (warmup > 0) {
+          warmup--;
+          if (ramp > 0) { rate += (target - rate) / ramp; ramp--; }
+          return rate;
+        }
         // Counter deltas contain whole frames. Allow one frame per sampling
         // interval so a fractional low pace is not mistaken for lost throughput.
         const rounding = 1000 / intervalMs;
@@ -32276,13 +32284,18 @@ function createNativeCaptureModule() {
         const stalled = sent === 0 && stats.captureFps > 1;
         const slowEncoder = (sent === 0 || sent + rounding < offered * 0.82) && (busy || !networkLimited && (stalled || stats.limitation === 'cpu' || Number.isFinite(cost) && cost > 1000 / offered));
         const slowCapture = native.outputOverrunFps > rate * 0.15 && native.outputFps < rate * 0.85 && native.outputWorkMs > 1000 / rate;
-        const slow = slowEncoder || slowCapture;
+        // Give WebRTC's spatial adaptation a bounded opportunity to shed pixels
+        // before a second controller also restricts the input frame cadence.
+        const spatialAdaptation = stats.degradationPreference === 'maintain-framerate' && stats.limitation === 'cpu' && !busy && !slowCapture && sent > 0;
+        adaptationGrace = spatialAdaptation ? adaptationGrace + intervalMs : 0;
+        const slow = slowCapture || slowEncoder && !(spatialAdaptation && adaptationGrace <= 6000);
         overloaded = slow ? overloaded + 1 : 0;
         // powerEfficientEncoder is not a serial/parallel guarantee. Even software
         // codecs can pipeline work, so measured throughput decides recovery.
         const captureReady = !Number.isFinite(native.outputWorkMs) || native.outputWorkMs < 750 / rate;
         const ready = sent > 0 && !slow && !busy && !networkLimited && captureReady;
         healthy = ready && sent + rounding >= rate * 0.95 ? healthy + 1 : 0;
+        if (healthy >= 3) stableRate = rate;
         stableMs = ready && sent + rounding >= rate * 0.82 ? stableMs + intervalMs : 0;
         if (probe) {
           probe.samples++;
@@ -32446,7 +32459,7 @@ function createNativeCaptureModule() {
           nativeSampleAgeMs: Number.isFinite(nativeSampleAt) ? Math.max(0, time - nativeSampleAt) : undefined };
       },
       updateEncoderStats(stats) {
-        if (closed) return;
+        if (closed || info?.publisherSid) return;
         const before = cadence.fps, rate = cadence.update(stats, { ...(now() - nativeSampleAt <= 6000 ? diagnostics : undefined), sourceAvailable: info?.sourceAvailable });
         if (nativePacing() && (lastPaceRate !== rate || now() - lastPaceAt >= 3000)) {
           try { bridge.pace(info.session, rate); lastPaceRate = rate; lastPaceAt = now(); }
@@ -32458,6 +32471,16 @@ function createNativeCaptureModule() {
         if (Math.abs(before - rate) > 0.5 && typeof customVoiceLog === 'function') customVoiceLog('info', '[CustomVoice] Capture cadence', { target: info?.fps, pacingFps: rate, native: nativePacing(), encodeFps: stats?.encodeFps, encodeMs: stats?.processingMs, outputWorkMs: diagnostics?.outputWorkMs, outputOverrunFps: diagnostics?.outputOverrunFps });
         if (frameTimer && rate > before) { clearTimeout(frameTimer); frameTimer = undefined; drain(); }
       },
+      async startPublisher(credentials) {
+        if (closed || !bridge.startPublisher) throw Error('Native publisher unavailable');
+        const result = await bridge.startPublisher(info.session, credentials);
+        if (closed) throw Error('Capture closed');
+        info = { ...info, publisherSid: result.sid, publisherIdentity: result.identity };
+        cadence.reset(info.fps);
+        if (nativePacing()) bridge.pace(info.session, info.fps);
+        return result;
+      },
+      async stopPublisher() { if (!closed && bridge.stopPublisher) await bridge.stopPublisher(info.session); info = {...info, publisherSid: undefined, publisherStats: undefined}; cadence.reset(info.fps); lastPaceRate = undefined; control.updateEncoderStats(); },
       async configure(nextQuality, nextFps) {
         if (closed) throw new Error('Native capture is closed.');
         if (quality === nextQuality && info.fps === nextFps) return info;
@@ -32494,25 +32517,33 @@ function createNativeCaptureModule() {
       if (typeof data.holdingFrame === 'boolean') info = { ...info, holdingFrame: data.holdingFrame };
       if (data.type === 'customvoice-native-status-v2') {
         if (data.event === 'error') fail(new Error(data.message));
-        else if (data.event === 'resized') { info = { ...info, ...data }; recoverCadence(); }
+        else if (data.event === 'resized') {
+          const changed = info.width !== data.width || info.height !== data.height;
+          info = { ...info, ...data }; if (changed) recoverCadence();
+        }
         else if (data.event === 'source-state') sourceState(data.sourceAvailable);
         else if (data.event === 'capture-mode') {
+          const changed = info.backend !== data.backend || info.sourceAvailable !== data.sourceAvailable;
           info = { ...info, ...data };
-          recoverCadence();
+          if (changed) recoverCadence();
           if (typeof customVoiceLog === 'function') customVoiceLog('info', '[CustomVoice] Automatic capture mode', { backend: data.backend, windowClientOnly: info.windowClientOnly });
         } else if (data.event === 'capture-warning') {
           if (typeof customVoiceLog === 'function') customVoiceLog('warn', '[CustomVoice] Fullscreen capture', data.message);
           globalThis.BdApi?.UI?.showToast?.(data.message, { type: 'warning' });
         }
+        else if (data.event === 'publisher-error') { if (!closed) track.dispatchEvent(new Event('customvoicepublishererror')); }
         else if (data.event === 'stats') {
           sourceState(data.sourceAvailable);
+          if (data.publisher) info = {...info, publisherStats: data.publisher, publisherTimestamp: data.elapsedMs};
           nativeSampleAt = now();
           if (lastNativeSample && data.elapsedMs > lastNativeSample.elapsedMs) {
             const seconds = (data.elapsedMs - lastNativeSample.elapsedMs) / 1000;
             const rate = key => Number.isFinite(data[key]) && Number.isFinite(lastNativeSample[key]) && data[key] >= lastNativeSample[key] ? (data[key] - lastNativeSample[key]) / seconds : undefined;
             const attempts = rate('outputAttempts'), work = rate('outputWorkUs');
-            diagnostics = { sourceFps: rate('captured'), outputFps: rate('frames'), repeatedFps: rate('repeated'), backpressureFps: rate('dropped'), conversionFps: rate('conversions'), gpuContentionsFps: rate('gpuContentions'), nativePacingFps: data.pacingFps, sourceAgeMs: data.sourceAgeMs, captureMode: data.backend,
+            diagnostics = { sourceFps: rate('captured'), outputFps: data.publisher && lastNativeSample.publisher ? Math.max(0, data.publisher.frames - lastNativeSample.publisher.frames) / seconds : rate('frames'), previewFps: data.publisher ? rate('frames') : undefined, repeatedFps: rate('repeated'), backpressureFps: rate('dropped'), conversionFps: rate('conversions'), gpuContentionsFps: rate('gpuContentions'), nativePacingFps: data.pacingFps, sourceAgeMs: data.sourceAgeMs, captureMode: data.backend,
               preImportDropFps: Math.max(0, preImportDropped - previousImportDropped) / seconds,
+              gpuWorkMs: rate('gpuSamples') > 0 ? rate('gpuWorkUs') / rate('gpuSamples') / 1000 : undefined,
+              busySlots: data.busySlots, slotHoldMs: rate('slotReleases') > 0 ? rate('slotHoldUs') / rate('slotReleases') / 1000 : undefined,
               outputWorkMs: attempts > 0 && Number.isFinite(work) ? work / attempts / 1000 : undefined, outputOverrunFps: rate('outputOverruns') };
           }
           lastNativeSample = data;
@@ -33442,10 +33473,14 @@ async function selectScreenCodec(width, height, fps, bitrate, track, allowedCode
       cancel?.();
     }
   }));
-  const ranked = results.filter((result) => result.score >= 0).sort((a, b) => b.score - a.score);
+  const device = nativeScreenCaptures.get(track)?.metadata?.deviceKey;
+  const history = typeof screenEncoderHistory === "undefined" ? undefined : screenEncoderHistory;
+  const ranked = results.filter((result) => result.score >= 0).map(result => ({ ...result,
+    score: result.score + (history?.score(history.key(device, width, height, fps, result.codec, result.capability.sdpFmtpLine)) ?? 0)
+  })).sort((a, b) => b.score - a.score);
   const selected = ranked[0]?.codec ?? "vp8";
   if (track) {
-    screenCodecSelections.set(track, { codec: selected, preferences: ranked.filter((r) => r.codec === selected).map((r) => r.capability), repair: caps?.codecs?.filter((c) => /\/(rtx|red|ulpfec)$/i.test(c.mimeType)) ?? [] });
+    screenCodecSelections.set(track, { device, width, height, fps, codec: selected, preferences: ranked.filter((r) => r.codec === selected).map((r) => r.capability), repair: caps?.codecs?.filter((c) => /\/(rtx|red|ulpfec)$/i.test(c.mimeType)) ?? [] });
     customVoiceLog("info", "[CustomVoice] Encoder selection", { width, height, fps, codec: selected, candidates: results });
   }
   return selected;
@@ -53755,9 +53790,11 @@ var VoiceClient = class {
         hasAudio: tracks.some((t) => t.kind === Track.Kind.Audio)
       }, void 0, () => this.room === room && this.screenCaptureAbort === captureAbort && !captureAbort.signal.aborted);
       authorized = true;
+      const nativePublished = typeof tryNativeScreenPublisher !== "undefined" && await tryNativeScreenPublisher(this, room, video, profile, captureAbort.signal);
       for (const track of tracks) {
         if (captureAbort.signal.aborted || this.room !== room || track.mediaStreamTrack.readyState === "ended")
           throw new Error("Screen capture stopped");
+        if (nativePublished && track === video) continue;
         await room.localParticipant.publishTrack(track, track.kind === Track.Kind.Video ? profile.publish : screenAudioPublishOptions);
         if (track.kind === Track.Kind.Video) {
           const sender = track.sender;
@@ -53810,8 +53847,11 @@ var VoiceClient = class {
     const work = Promise.resolve().then(async () => {
       // Signaling must not wait for WebRTC renegotiation. A failure in either
       // path must never keep the other path (or a captured audio track) alive.
+      const nativeBroadcast = this.nativeBroadcast;
       const operations = [this.flushScreenStop()];
+      if (nativeBroadcast) operations.push(nativeBroadcast.stop());
       for (const track of tracks) {
+        if (nativeBroadcast?.video === track) continue;
         operations.push(Promise.resolve().then(() => room.localParticipant.unpublishTrack(track)));
       }
       const results = await Promise.allSettled(operations);
@@ -53910,6 +53950,20 @@ var VoiceClient = class {
     const room = this.room;
     const publication = room?.localParticipant.getTrackPublication(Track.Source.ScreenShare);
     const track = publication?.track;
+    if (this.nativeBroadcast?.video === track) {
+      const signal = this.screenCaptureAbort.signal;
+      await this.nativeBroadcast.stop();
+      const profile = await fixScreenCapture(track.mediaStreamTrack, quality, fps);
+      const size = track.mediaStreamTrack.getSettings();
+      profile.publish.videoCodec = await selectScreenCodec(size.width, size.height, fps, profile.bitrate, track.mediaStreamTrack, room.localParticipant.enabledPublishVideoCodecs);
+      if (!await tryNativeScreenPublisher(this, room, track, profile, signal)) {
+        if (this.room !== room || signal.aborted) throw new DOMException('Screen cancelled', 'AbortError');
+        await room.localParticipant.publishTrack(track, profile.publish);
+        await configureScreenSender(track, profile);
+      }
+      this.activeShare = {...this.activeShare, quality, fps};
+      return;
+    }
     if (!room || !track || track.kind !== Track.Kind.Video || !track.sender)
       throw new Error("\uD604\uC7AC \uC1A1\uCD9C \uC911\uC778 \uBC29\uC1A1\uC744 \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.");
     const capture = track.mediaStreamTrack;
@@ -53959,6 +54013,11 @@ var VoiceClient = class {
     }
   }
   async releaseMedia() {
+    for (const timer of this.nativeScreenEndedTimers?.values() ?? []) clearTimeout(timer);
+    this.nativeScreenEndedTimers?.clear();
+    const nativeBroadcast = this.nativeBroadcast;
+    if (nativeBroadcast) { nativeBroadcast.video.stop(); await nativeBroadcast.stop(); }
+    this.nativeBindingsCleanup?.(); this.nativeBindingsCleanup = undefined;
     for (const recovery of this.screenRecoveries.values()) recovery.cancel?.();
     this.screenRecoveries.clear();
     this.activeShare = void 0;
@@ -53982,6 +54041,8 @@ var VoiceClient = class {
     this.audioBitrate = credentials.audioBitrate ?? 64e3;
     const room = new Room(mediaRoomOptions);
     this.room = room;
+    this.nativeScreenCapability = credentials.screenPublisher;
+    if (typeof installNativeScreenBindings !== "undefined") this.nativeBindingsCleanup = installNativeScreenBindings(this, room);
     bindRemoteScreenLifecycle(this, room);
     room.on(
       RoomEvent.ActiveSpeakersChanged,
@@ -54012,7 +54073,7 @@ var VoiceClient = class {
       (track, publication, participant) => this.emit({
         op: "MEDIA_TRACK_SUBSCRIBED",
         success: true,
-        data: { track, publication, participant }
+        data: { track, publication, participant: room.remoteParticipants.get(room.customVoiceScreenOwner?.(participant.identity)) ?? participant }
       })
     );
     room.on(
@@ -54020,7 +54081,7 @@ var VoiceClient = class {
       (track, publication, participant) => this.emit({
         op: "MEDIA_TRACK_UNSUBSCRIBED",
         success: true,
-        data: { track, publication, participant }
+        data: { track, publication, participant: room.remoteParticipants.get(room.customVoiceScreenOwner?.(participant.identity)) ?? participant }
       })
     );
     room.on(
@@ -54045,18 +54106,19 @@ var VoiceClient = class {
     }
     const subscribeMicrophones = (participant) => {
       for (const publication of participant.trackPublications.values())
-        if (publication.source === Track.Source.Microphone || this.watching.has(participant.identity) && (publication.source === Track.Source.ScreenShare || publication.source === Track.Source.ScreenShareAudio))
+        if (publication.source === Track.Source.Microphone || this.watching.has(room.customVoiceScreenOwner?.(participant.identity) ?? participant.identity) && (publication.source === Track.Source.ScreenShare || publication.source === Track.Source.ScreenShareAudio))
           publication.setSubscribed(true);
     };
     for (const participant of room.remoteParticipants.values())
       subscribeMicrophones(participant);
     room.on(RoomEvent.ParticipantConnected, subscribeMicrophones);
     room.on(RoomEvent.TrackPublished, (publication, participant) => {
-      if (publication.source === Track.Source.Microphone || this.watching.has(participant.identity) && (publication.source === Track.Source.ScreenShare || publication.source === Track.Source.ScreenShareAudio))
+      if (publication.source === Track.Source.Microphone || this.watching.has(room.customVoiceScreenOwner?.(participant.identity) ?? participant.identity) && (publication.source === Track.Source.ScreenShare || publication.source === Track.Source.ScreenShareAudio))
         publication.setSubscribed(true);
     });
     this.emit({ op: "MEDIA_ROOM_READY", success: true, data: { room } });
     for (const participant of room.remoteParticipants.values()) {
+      if (room.customVoiceScreenOwner?.(participant.identity) !== undefined && room.customVoiceScreenOwner(participant.identity) !== participant.identity) continue;
       const publication = participant.getTrackPublication(Track.Source.ScreenShare);
       this.emit({ op: publication ? "MEDIA_SCREEN_PUBLISHED" : "MEDIA_SCREEN_ENDED", success: true, data: { identity: participant.identity } });
       if (!publication) this.watchScreen(participant.identity, false);
@@ -54072,9 +54134,8 @@ var VoiceClient = class {
     }
     const participant = this.room?.remoteParticipants.get(identity2);
     if (!participant) throw new Error("Participant not found");
-    for (const publication of participant.trackPublications.values())
-      if (publication.source === Track.Source.ScreenShare || publication.source === Track.Source.ScreenShareAudio)
-        publication.setSubscribed(watch);
+    for (const source of [Track.Source.ScreenShare, Track.Source.ScreenShareAudio])
+      participant.getTrackPublication(source)?.setSubscribed(watch);
   }
   recoverScreenSubscription(identity, sid) {
     const room = this.room, participant = room?.remoteParticipants.get(identity);
@@ -54167,8 +54228,18 @@ var VoiceClient = class {
   }
 };
 function bindRemoteScreenLifecycle(client, room) {
-  const ended = (participant, publication) => {
+  const ended = (participant, publication, afterGrace = false) => {
     if (client.mediaRoom !== room) return;
+    const owner = room.customVoiceScreenOwner?.(participant.identity);
+    if (owner && owner !== participant.identity) {
+      const voice = room.remoteParticipants.get(owner);
+      if (voice && !voice.getTrackPublication(Track.Source.ScreenShare) && !afterGrace) {
+        const timers = client.nativeScreenEndedTimers ??= new Map();
+        if (!timers.has(owner)) timers.set(owner, setTimeout(() => { timers.delete(owner); ended(voice, publication, true); }, 10000));
+        return;
+      }
+      participant = voice ?? participant;
+    }
     const currentParticipant = room.remoteParticipants.get(participant.identity);
     if (currentParticipant && currentParticipant !== participant) return;
     const current = currentParticipant?.getTrackPublication(Track.Source.ScreenShare);
@@ -54183,7 +54254,7 @@ function bindRemoteScreenLifecycle(client, room) {
   room.on(RoomEvent.ParticipantDisconnected, (participant) => ended(participant));
   room.on(RoomEvent.TrackPublished, (publication, participant) => {
     if (client.mediaRoom === room && publication.source === Track.Source.ScreenShare)
-      client.emit({ op: "MEDIA_SCREEN_PUBLISHED", success: true, data: { identity: participant.identity } });
+      client.emit({ op: "MEDIA_SCREEN_PUBLISHED", success: true, data: { identity: room.customVoiceScreenOwner?.(participant.identity) ?? participant.identity } });
   });
 }
 function base64url3(bytes) {
@@ -55189,6 +55260,186 @@ var customVoiceDiscordCss = `
 @media(prefers-reduced-motion:reduce){.cv *{scroll-behavior:auto;transition:none!important;animation:none!important}}
 @media(forced-colors:active){.cv-settings .cv-setting-toggle>input{appearance:auto;-webkit-appearance:checkbox}.cv-settings .cv-setting-toggle>input::before{display:none}}
 `;
+
+// Runtime observations are advisory, local and scoped to adapter/driver/browser.
+// A network or capture bottleneck must never blacklist an encoder.
+var screenEncoderHistory = (() => {
+  let rows;
+  const age = 14 * 86400000;
+  const read = () => {
+    if (rows) return rows;
+    try { rows = globalThis.BdApi?.Data?.load('CustomVoice', 'encoderHistoryV1'); } catch {}
+    if (!Array.isArray(rows)) rows = [];
+    rows = rows.filter(r => typeof r?.key === 'string' && r.key.length < 1024 && Number.isFinite(r.score) && r.time > Date.now() - age && r.time <= Date.now());
+    return rows;
+  };
+  const profile = text => /profile-level-id=([\da-f]+)/i.exec(text ?? '')?.[1]?.toLowerCase() ?? '';
+  const key = (device, width, height, fps, codec, parameters) => device && JSON.stringify([
+    device, globalThis.navigator?.userAgent ?? '', Math.ceil(width / 640), Math.ceil(height / 360), Math.ceil(fps / 30), codec, profile(parameters)
+  ]);
+  return {
+    key,
+    score(key) { return key ? read().find(r => r.key === key)?.score ?? 0 : 0; },
+    observe(track, stats, native) {
+      const selection = screenCodecSelections.get(track);
+      if (!selection || !selection.device || !stats.sample || stats.intervalMs > 6000 || !(stats.intervalMs > 0) || stats.networkLimited || native?.sourceAvailable === false || native?.backpressureFps > 1 || native?.outputOverrunFps > 1 || native?.cadenceState !== 'target') return;
+      if (!(stats.captureFps >= selection.fps * .9) || !(stats.encodeFps >= 0) || !stats.codec) return;
+      const id = key(selection.device, selection.width, selection.height, selection.fps, stats.codec, stats.codecParameters);
+      if (!id) return;
+      if (selection.observedId !== id) { selection.observedId = id; selection.observedMs = 0; selection.observedSum = 0; }
+      // Only full-size observations compare equal workloads.
+      if (stats.width < selection.width * .95 || stats.height < selection.height * .95) return;
+      selection.observedMs += stats.intervalMs;
+      selection.observedSum += Math.min(1, stats.encodeFps / selection.fps) * stats.intervalMs;
+      if (selection.observedMs < 30000) return;
+      const ratio = selection.observedSum / selection.observedMs;
+      const score = ratio >= .95 ? 2 : ratio < .8 && stats.limitation === 'cpu' ? -2 : 0;
+      const values = read().filter(r => r.key !== id && r.time > Date.now() - age);
+      rows = [...values, { key: id, score, time: Date.now() }].slice(-64);
+      try { globalThis.BdApi?.Data?.save('CustomVoice', 'encoderHistoryV1', rows); } catch {}
+      selection.observedMs = selection.observedSum = 0;
+    }
+  };
+})();
+
+// Only room metadata written by the server can bind a dedicated publisher to
+// a voice participant. Never accept self-declared participant metadata.
+function installNativeScreenBindings(client, room) {
+  const originals = new Map();
+  let bindings = new Map(), closed = false;
+  const ownerOf = identity => bindings.get(identity)?.owner ?? identity;
+  const refresh = () => {
+    if (closed) return;
+    const next = new Map(), owners = new Set();
+    try {
+      const metadata = JSON.parse(room.metadata || '{}').customVoiceNativeScreen;
+      if (metadata?.version === 1 && Array.isArray(metadata.bindings) && metadata.bindings.length <= 512) {
+        for (const row of metadata.bindings) {
+          if (typeof row?.owner !== 'string' || typeof row.publisher !== 'string' || typeof row.session !== 'string' || row.owner.startsWith('cv-screen:') || row.owner.length > 256 || row.publisher.length > 256 || !row.publisher.startsWith('cv-screen:') || row.owner === row.publisher || owners.has(row.owner) || next.has(row.publisher)) throw Error('Invalid screen binding');
+          owners.add(row.owner); next.set(row.publisher, row);
+        }
+      }
+    } catch { next.clear(); }
+    const previous = bindings;
+    bindings = next;
+    for (const participant of [room.localParticipant, ...room.remoteParticipants.values()]) {
+      if (originals.has(participant)) continue;
+      const original = participant.getTrackPublication;
+      function get(source) {
+        if (source === Track.Source.ScreenShare) {
+          if (participant === room.localParticipant && room.customVoiceNativePreview) return room.customVoiceNativePreview;
+          if (participant !== room.localParticipant) {
+            const row = [...bindings.values()].find(row => row.owner === participant.identity);
+            const publisher = row && room.remoteParticipants.get(row.publisher);
+            const lookup = publisher && originals.get(publisher)?.original;
+            const publication = lookup ? lookup.call(publisher, source) : publisher?.getTrackPublication(source);
+            if (publication) return publication;
+          }
+        }
+        return original.call(this, source);
+      }
+      originals.set(participant, {original, get}); participant.getTrackPublication = get;
+    }
+    for (const [participant, methods] of originals) if (participant !== room.localParticipant && room.remoteParticipants.get(participant.identity) !== participant) {
+      if (participant.getTrackPublication === methods.get) participant.getTrackPublication = methods.original;
+      originals.delete(participant);
+    }
+    for (const [id, row] of bindings) {
+      const participant = room.remoteParticipants.get(id);
+      participant?.getTrackPublication(Track.Source.ScreenShare)?.setSubscribed(client.watching.has(row.owner));
+    }
+    for (const owner of new Set([...previous.values(), ...bindings.values()].map(row => row.owner))) {
+      const voice = room.remoteParticipants.get(owner);
+      if (!voice || voice.getTrackPublication(Track.Source.ScreenShare)) continue;
+      const timers = client.nativeScreenEndedTimers ??= new Map();
+      if (!timers.has(owner)) timers.set(owner, setTimeout(() => {
+        timers.delete(owner);
+        if (closed || client.room !== room || room.remoteParticipants.get(owner)?.getTrackPublication(Track.Source.ScreenShare)) return;
+        try { client.watchScreen(owner, false); } catch {}
+        client.emit({op:'MEDIA_SCREEN_ENDED',success:true,data:{identity:owner}});
+      }, 10000));
+    }
+    // Re-evaluate the owner's screen after metadata and track updates arrive
+    // in either order. Keep the existing owner identity used by viewer rosters.
+    if (client.room === room) for (const owner of room.remoteParticipants.values()) {
+      if (bindings.has(owner.identity)) continue;
+      const publication = owner.getTrackPublication(Track.Source.ScreenShare);
+      if (publication) client.emit({op:'MEDIA_SCREEN_PUBLISHED', success:true, data:{identity:owner.identity}});
+    }
+  };
+  room.customVoiceScreenOwner = ownerOf;
+  const events = [RoomEvent.RoomMetadataChanged, RoomEvent.ParticipantConnected, RoomEvent.ParticipantDisconnected, RoomEvent.TrackPublished, RoomEvent.TrackUnpublished];
+  for (const event of events) room.on(event, refresh);
+  refresh();
+  return () => {
+    closed = true;
+    for (const event of events) room.off(event, refresh);
+    for (const [participant, methods] of originals) if (participant.getTrackPublication === methods.get) participant.getTrackPublication = methods.original;
+    delete room.customVoiceScreenOwner; delete room.customVoiceNativePreview;
+  };
+}
+
+async function tryNativeScreenPublisher(client, room, video, profile, signal) {
+  const capture = nativeScreenCaptures.get(video.mediaStreamTrack);
+  if (client.nativeScreenCapability !== 'nvenc-v1' || !capture?.startPublisher || !globalThis.CustomVoiceNative?.startPublisher) return false;
+  const current = () => client.room === room && !signal.aborted && video.mediaStreamTrack.readyState !== 'ended';
+  let session;
+  try {
+    const credentials = await client.request('/api/v1/livekit/screen-publisher', 'POST');
+    session = credentials?.session;
+    if (!current()) throw new DOMException('Screen cancelled', 'AbortError');
+    if (typeof session !== 'string' || !/^[a-zA-Z0-9-]{16,64}$/.test(session) || credentials.owner !== room.localParticipant.identity || credentials.identity === credentials.owner || !credentials.identity?.startsWith('cv-screen:')) throw Error('Invalid screen publisher identity');
+    const result = await capture.startPublisher({...credentials, bitrate:profile.bitrate});
+    if (!current()) throw new DOMException('Screen cancelled', 'AbortError');
+    room.customVoiceNativePreview = {track:video,trackSid:result.sid,source:Track.Source.ScreenShare,isLocal:true,isMuted:false};
+    video.getRTCStatsReport = async () => {
+      const data = capture.metadata.publisherStats, timestamp = data?.timestamp;
+      return new Map(data?.timestamp > 0 ? [['native', {id:result.sid,type:'outbound-rtp',kind:'video',timestamp,framesEncoded:data.frames,framesSent:data.sentFrames,bytesSent:data.sentBytes,totalEncodeTime:data.encodeUs/1e6,encoderImplementation:'NVENC direct',qualityLimitationReason:'none',frameWidth:video.mediaStreamTrack.getSettings().width,frameHeight:video.mediaStreamTrack.getSettings().height}]] : []);
+    };
+    const ended = () => {
+      if (client.room !== room) return;
+      room.emit?.(RoomEvent.LocalTrackUnpublished, {track:video,trackSid:result.sid,source:Track.Source.ScreenShare});
+      void client.stopScreenShare().catch(() => {});
+    };
+    let renewing = false;
+    const leaseTimer = setInterval(async () => {
+      if (renewing || !current()) return; renewing = true;
+      try { await client.request('/api/v1/livekit/screen-publisher/' + encodeURIComponent(session), 'PATCH'); }
+      catch { if (current() && client.nativeBroadcast?.video === video) { video.mediaStreamTrack.stop(); ended(); } }
+      finally { renewing = false; }
+    }, 30000);
+    const stop = async () => {
+      clearInterval(leaseTimer);
+      video.mediaStreamTrack.removeEventListener('customvoicepublishererror', fallback);
+      video.mediaStreamTrack.removeEventListener('ended', ended);
+      if (room.customVoiceNativePreview?.track === video) delete room.customVoiceNativePreview;
+      await capture.stopPublisher().catch(() => {});
+      await client.request('/api/v1/livekit/screen-publisher/' + encodeURIComponent(session), 'DELETE').catch(() => {});
+      if (client.nativeBroadcast?.video === video) client.nativeBroadcast = undefined;
+    };
+    let fallingBack = false;
+    const fallback = async () => {
+      if (fallingBack || !current()) return; fallingBack = true;
+      try {
+        await room.localParticipant.publishTrack(video, profile.publish);
+        if (!current()) { await room.localParticipant.unpublishTrack(video); return; }
+        await configureScreenSender(video, profile);
+        await stop();
+        globalThis.BdApi?.UI?.showToast?.('NVENC 연결이 중단되어 일반 화면공유로 전환했습니다.', {type:'warning'});
+      } catch (error) { await stop(); if (current()) { video.mediaStreamTrack.stop(); ended(); } }
+    };
+    client.nativeBroadcast = {video,stop};
+    video.mediaStreamTrack.addEventListener('customvoicepublishererror', fallback);
+    video.mediaStreamTrack.addEventListener('ended', ended, {once:true});
+    return true;
+  } catch (error) {
+    await capture.stopPublisher().catch(() => {});
+    if (typeof session === 'string' && /^[a-zA-Z0-9-]{16,64}$/.test(session)) await client.request('/api/v1/livekit/screen-publisher/' + encodeURIComponent(session), 'DELETE').catch(() => {});
+    if (!current()) throw new DOMException('Screen cancelled', 'AbortError');
+    customVoiceLog('warn', '[CustomVoice] Native publisher unavailable; using browser encoder');
+    return false;
+  }
+}
 
 // </CustomVoiceFeatures>
 
@@ -58162,6 +58413,7 @@ function readScreenStats(report, previous, local) {
     sendDelay: local ? selected.totalPacketSendDelay : void 0,
     limitations: local ? selected.qualityLimitationDurations : void 0,
     time: local ? selected.totalEncodeTime : selected.totalDecodeTime,
+    freezes: selected.freezeCount, freezeDuration: selected.totalFreezesDuration, jitterDelay: selected.jitterBufferDelay, jitterEmitted: selected.jitterBufferEmittedCount,
     source: source ? { id: source.id, timestamp: source.timestamp, frames: source.frames } : void 0
   };
   let fps = Number.isFinite(selected.framesPerSecond) ? selected.framesPerSecond : void 0;
@@ -58190,7 +58442,10 @@ function readScreenStats(report, previous, local) {
   if (local && previous?.id === sample.id && sample.timestamp > previous.timestamp && Number.isFinite(sample.sentFrames) && Number.isFinite(previous.sentFrames) && sample.sentFrames >= previous.sentFrames)
     fps = (sample.sentFrames - previous.sentFrames) * 1e3 / (sample.timestamp - previous.timestamp);
   const networkLimited = local && (selected.qualityLimitationReason === "bandwidth" || bandwidthFraction > 0.2 || packetSendDelayMs > 150 && fps < encodeFps * 0.9);
-  return { sample, intervalMs, fps, encodeFps, captureFps, processingMs, sendBitrate, packetSendDelayMs, cpuFraction, bandwidthFraction, networkLimited,
+  const positiveDelta = (field) => previous?.id === sample.id && sample.timestamp > previous.timestamp && Number.isFinite(sample[field]) && Number.isFinite(previous[field]) && sample[field] >= previous[field] ? sample[field] - previous[field] : undefined;
+  const emitted = positiveDelta('jitterEmitted'), jitter = positiveDelta('jitterDelay');
+  const jitterBufferMs = emitted > 0 && Number.isFinite(jitter) ? jitter * 1000 / emitted : undefined;
+  return { sample, freezes: positiveDelta('freezes'), freezeDuration: positiveDelta('freezeDuration'), jitterBufferMs, framesDropped: selected.framesDropped, packetsLost: selected.packetsLost, intervalMs, fps, encodeFps, captureFps, processingMs, sendBitrate, packetSendDelayMs, cpuFraction, bandwidthFraction, networkLimited,
     width: selected.frameWidth, height: selected.frameHeight, targetBitrate: selected.targetBitrate, resolutionChanges: selected.qualityLimitationResolutionChanges,
     limitation: selected.qualityLimitationReason, encoder: local ? selected.encoderImplementation : void 0, powerEfficientEncoder: local ? selected.powerEfficientEncoder : void 0, codec: report.get?.(selected.codecId)?.mimeType?.split("/")[1], codecParameters: report.get?.(selected.codecId)?.sdpFmtpLine };
 }
@@ -58221,6 +58476,7 @@ function watchScreenStats(track, local, doc, update, interval = 2000) {
           stats.backend = native?.backend;
           native?.updateEncoderStats?.(stats);
           stats.native = native?.diagnostics;
+          if (typeof screenEncoderHistory !== "undefined") screenEncoderHistory.observe(track.mediaStreamTrack, stats, stats.native);
           if (stats.encoder && watcher.encoder !== stats.encoder) {
             watcher.encoder = stats.encoder;
             customVoiceLog("info", "[CustomVoice] Active encoder", { encoder: stats.encoder, powerEfficient: stats.powerEfficientEncoder, codec: stats.codec, parameters: stats.codecParameters });
@@ -58233,7 +58489,7 @@ function watchScreenStats(track, local, doc, update, interval = 2000) {
         }
         if (stats && !local && (!watcher.lastLog || stats.sample.timestamp - watcher.lastLog >= 10000)) {
           watcher.lastLog = stats.sample.timestamp;
-          customVoiceLog('info', '[CustomVoice] Remote screen performance', { trackSid: track.sid, decodeFps: stats.fps, framesDecoded: stats.sample.frames, bytesReceived: stats.sample.bytes });
+          customVoiceLog('info', '[CustomVoice] Remote screen performance', { trackSid: track.sid, decodeFps: stats.fps, framesDecoded: stats.sample.frames, bytesReceived: stats.sample.bytes, freezes: stats.freezes, freezeDuration: stats.freezeDuration, jitterBufferMs: stats.jitterBufferMs, framesDropped: stats.framesDropped, packetsLost: stats.packetsLost });
         }
         for (const s of watcher.subscribers) if (!s.doc.hidden) s.update(stats);
       } catch {

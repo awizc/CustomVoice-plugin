@@ -170,12 +170,14 @@ test('Alt-Tab source waits cannot collapse cadence, and return-to-game skips sta
   // Before the fix, missing input was reported as dropped/backpressured output.
   for(let i=0;i<12;i++)assert.equal(cadence.update(stalled,{sourceAvailable:false,backpressureFps:165,outputFps:0}),165);
   cadence.recover();
-  for(let i=0;i<2;i++)assert.equal(cadence.update(stalled,{sourceAvailable:true,backpressureFps:165}),165);
+  assert.equal(cadence.fps,123.75);
+  assert.equal(cadence.update(stalled,{sourceAvailable:true,backpressureFps:165}),144.375);
+  assert.equal(cadence.update(stalled,{sourceAvailable:true,backpressureFps:165}),165);
   assert.equal(cadence.update({encodeFps:165,captureFps:165,processingMs:2},{sourceAvailable:true}),165);
   // Real sustained encoder pressure must still throttle, then recover again.
   const overloaded={encodeFps:30,captureFps:165,processingMs:40};
   cadence.update(overloaded,{sourceAvailable:true});cadence.update(overloaded,{sourceAvailable:true});assert.ok(cadence.fps<165);
-  cadence.recover();assert.equal(cadence.fps,165);
+  cadence.recover();assert.equal(cadence.fps,123.75);
 });
 
 test('zero encoded frames with genuine backpressure back off gradually instead of jumping straight to 1 FPS',()=>{
@@ -295,7 +297,7 @@ test('capture transitions and old stats gaps cannot accumulate into fresh overlo
   assert.equal(cadence.fps,165);
 });
 
-test('mode and source recovery immediately restore native pace and state also arrives with frames',async()=>{
+test('mode and source recovery ramp native pace and duplicate events preserve feedback',async()=>{
   const h=rendererHarness({nativePacing:true}),control=await h.start();
   const slow={encodeFps:30,captureFps:144,processingMs:25};
   control.updateEncoderStats(slow);control.updateEncoderStats(slow);assert.equal(control.diagnostics.pacingFps,72);
@@ -304,11 +306,15 @@ test('mode and source recovery immediately restore native pace and state also ar
   for(let i=0;i<6;i++)control.updateEncoderStats({encodeFps:0,captureFps:0});
   assert.equal(control.diagnostics.pacingFps,144);assert.equal(control.diagnostics.sourceAvailable,false);
   h.emit('customvoice-native-frame-v2',{sourceAvailable:true,frame:{close(){}}});
-  assert.equal(control.diagnostics.sourceAvailable,true);assert.equal(h.paces.at(-1),144);
+  assert.equal(control.diagnostics.sourceAvailable,true);assert.equal(h.paces.at(-1),108);
   control.updateEncoderStats(slow);control.updateEncoderStats(slow);assert.equal(control.diagnostics.pacingFps,144);
   control.updateEncoderStats(slow);control.updateEncoderStats(slow);assert.equal(control.diagnostics.pacingFps,72);
-  h.emit('customvoice-native-status-v2',{event:'resized',width:1920,height:1080});
-  assert.equal(control.diagnostics.pacingFps,144);
+  h.emit('customvoice-native-status-v2',{event:'resized',width:1280,height:720});
+  assert.equal(control.diagnostics.pacingFps,108);
+  control.updateEncoderStats({encodeFps:108,captureFps:108});
+  assert.equal(control.diagnostics.pacingFps,126);
+  h.emit('customvoice-native-status-v2',{event:'resized',width:1280,height:720});
+  assert.equal(control.diagnostics.pacingFps,126);
   await new Promise(setImmediate);control.stop();
 });
 
@@ -429,3 +435,12 @@ for (const nativeCaptureModule of [{}, { stopAll() { throw new Error('Native cle
     await plugin.stop(); assert.equal(stopped, true); assert.equal(plugin.manager, undefined);
   });
 }
+
+test('spatial adaptation has a bounded grace period but cannot permanently mask overload',()=>{
+ const cadence=rendererHarness().api.createCadenceController(165);
+ const sample={intervalMs:1000,encodeFps:80,captureFps:165,processingMs:10,limitation:'cpu',degradationPreference:'maintain-framerate'};
+ for(let i=0;i<6;i++)assert.equal(cadence.update(sample),165);
+ cadence.update(sample);cadence.update(sample);assert.ok(cadence.fps<165);
+ const pressured=rendererHarness().api.createCadenceController(165);
+ pressured.update(sample,{backpressureFps:50});pressured.update(sample,{backpressureFps:50});assert.ok(pressured.fps<165);
+});

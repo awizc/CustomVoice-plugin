@@ -1,4 +1,4 @@
-param([string]$Dotnet = 'dotnet', [switch]$SkipCapabilityCheck)
+param([string]$Dotnet = 'dotnet', [string]$Go = 'go', [switch]$SkipCapabilityCheck)
 $ErrorActionPreference = 'Stop'
 $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
 $project = Join-Path $PSScriptRoot 'CustomVoice.Capture.csproj'
@@ -9,6 +9,11 @@ if ($LASTEXITCODE -ne 0) { throw 'Native renderer bundle sync failed' }
 if ($LASTEXITCODE -ne 0) { throw 'Native capture restore failed' }
 & $Dotnet publish $project -c Release --no-restore --self-contained true -o $outputDirectory --verbosity quiet
 if ($LASTEXITCODE -ne 0) { throw 'Native capture build failed' }
+Push-Location (Join-Path $PSScriptRoot 'publisher')
+try {
+    & $Go build -trimpath -ldflags '-s -w' -o (Join-Path $outputDirectory 'CustomVoice.Publisher.exe') .
+    if ($LASTEXITCODE -ne 0) { throw 'Native publisher build failed' }
+} finally { Pop-Location }
 $builtNativeVersion = [regex]::Match([IO.File]::ReadAllText((Join-Path $PSScriptRoot 'NativeUpdate.cs')), 'CurrentVersion\s*=\s*"(\d+\.\d+\.\d+)"').Groups[1].Value
 if (-not $builtNativeVersion) { throw 'Compiled native version metadata is missing' }
 [IO.File]::WriteAllText((Join-Path $outputDirectory 'native-version.json'), (ConvertTo-Json @{ version = $builtNativeVersion }), [Text.UTF8Encoding]::new($false))
@@ -26,6 +31,8 @@ Get-ChildItem -LiteralPath $hookDirectory -File | ForEach-Object { Copy-Item -Li
 $licenseDirectory = Join-Path $outputDirectory 'licenses'
 New-Item -ItemType Directory -Path $licenseDirectory -Force | Out-Null
 Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'licenses') -File | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $licenseDirectory -Force }
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'nvenc/LICENSE') -Destination (Join-Path $licenseDirectory 'NvEncSharp-LICENSE.txt')
+& (Join-Path $PSScriptRoot 'publisher/licenses.ps1') -Go $Go -Destination (Join-Path $licenseDirectory 'publisher-licenses.txt')
 $assets = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'obj/project.assets.json') -Raw | ConvertFrom-Json
 $runtimeConfig = Get-Content -LiteralPath (Join-Path $outputDirectory 'CustomVoice.Capture.runtimeconfig.json') -Raw | ConvertFrom-Json
 $runtime = $runtimeConfig.runtimeOptions.includedFrameworks | Where-Object { $_.name -eq 'Microsoft.NETCore.App' } | Select-Object -First 1

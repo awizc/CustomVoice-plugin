@@ -77,7 +77,7 @@ function install({ allowTest = false } = {}) {
     deliver(message);
   });
   contextBridge.exposeInMainWorld('CustomVoiceNative', {
-    protocol: 2, version: '1.1.14', windowCaptureAuto: true, available: Boolean(textures?.importSharedTexture),
+    protocol: 2, version: '1.1.15', windowCaptureAuto: true, available: Boolean(textures?.importSharedTexture),
     listWindowSources: () => ipcRenderer.invoke(prefix + 'window-sources'),
     async audioStart(source){const info=await ipcRenderer.invoke(prefix+'audio-start',source);audioSessions.add(info.session);return info;},
     audioActivate:(id,transport=1)=>ipcRenderer.invoke(prefix+'audio-activate',id,transport),
@@ -96,7 +96,7 @@ function install({ allowTest = false } = {}) {
         void ipcRenderer.invoke(prefix + 'stop', info.session).catch(() => {});
         throw new Error('Capture startup was superseded.');
       }
-      active.add(info.session); return { ...info, preloadVersion: '1.1.14' };
+      active.add(info.session); return { ...info, preloadVersion: '1.1.15' };
     },
     activate: (id, boundedDelivery = false) => {
       // Opt in so older renderer bundles remain compatible with this preload.
@@ -110,6 +110,8 @@ function install({ allowTest = false } = {}) {
       const pending = delivery.pending; delivery.pending = null;
       if (pending) deliver(pending);
     },
+    startPublisher: (id, credentials) => ipcRenderer.invoke(prefix + 'publisher-start', id, credentials),
+    stopPublisher: id => ipcRenderer.invoke(prefix + 'publisher-stop', id),
     configure: (id, fps, quality) => ipcRenderer.invoke(prefix + 'configure', id, fps, quality),
     setBorder: (id, visible) => ipcRenderer.invoke(prefix + 'border', id, visible),
     pace: (id, fps) => { if (active.has(id) && Number.isFinite(fps) && fps >= 1 && fps <= 165) ipcRenderer.send(prefix + 'pace', id, fps); },

@@ -57,7 +57,7 @@ try
     string payload = Path.Combine(root, "package", "CustomVoice.native"), plugins = Path.Combine(root, "BetterDiscord", "plugins"), data = Path.Combine(root, "BetterDiscord", "data");
     Directory.CreateDirectory(payload); Directory.CreateDirectory(plugins); Directory.CreateDirectory(data);
     string archive = Path.Combine(data, "betterdiscord.asar"); File.WriteAllBytes(archive, original);
-    foreach (string name in new[] { "CustomVoice.Capture.exe", "CustomVoice.Capture.dll", "CustomVoice.Capture.runtimeconfig.json", "host-main.cjs", "host-preload.cjs", "audio-main.cjs", "github-main.cjs", "window-sources-main.cjs", "native-version.json", "coreclr.dll", "hostfxr.dll" }) File.WriteAllText(Path.Combine(payload, name), "fixture:" + name);
+    foreach (string name in new[] { "CustomVoice.Capture.exe", "CustomVoice.Publisher.exe", "CustomVoice.Capture.dll", "CustomVoice.Capture.runtimeconfig.json", "host-main.cjs", "host-preload.cjs", "audio-main.cjs", "github-main.cjs", "window-sources-main.cjs", "native-version.json", "coreclr.dll", "hostfxr.dll" }) File.WriteAllText(Path.Combine(payload, name), "fixture:" + name);
     Directory.CreateDirectory(Path.Combine(payload, "game-hook"));
     foreach (string name in new[] { "graphics-hook32.dll", "graphics-hook64.dll", "inject-helper32.exe", "inject-helper64.exe", "get-graphics-offsets32.exe", "get-graphics-offsets64.exe", "COPYING.txt", "NOTICE.txt", "OBS-Studio-32.0.4-Sources.tar.gz" }) File.WriteAllText(Path.Combine(payload, "game-hook", name), "fixture:" + name);
     File.WriteAllText(Path.Combine(root, "package", "CustomVoice.plugin.js"), "new plugin");

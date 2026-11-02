@@ -61,11 +61,13 @@ internal static class Program
             {
                 var line = await Console.In.ReadLineAsync(ended.Token);
                 if (line == null) break;
-                if (line.Length > 4096) throw new InvalidDataException("Control message too large");
+                if (line.Length > 16384) throw new InvalidDataException("Control message too large");
                 using var doc = JsonDocument.Parse(line);
                 var message = doc.RootElement;
                 switch (message.GetProperty("type").GetString())
                 {
+                    case "publisher-start": _ = capture.StartPublisher(new NativePublisher.Credentials(message.GetProperty("url").GetString()!, message.GetProperty("token").GetString()!, message.GetProperty("identity").GetString()!, message.GetProperty("owner").GetString()!, message.GetProperty("bitrate").GetInt32()), message.GetProperty("request").GetInt32()); break;
+                    case "publisher-stop": capture.StopPublisher(); break;
                     case "release": capture.Release(message.GetProperty("slot").GetInt32(), message.GetProperty("sequence").GetInt64()); break;
                     case "configure": capture.Configure(message.GetProperty("fps").GetInt32(), message.GetProperty("quality").GetString()!, message.GetProperty("request").GetInt32()); break;
                     case "pace": capture.SetPacing(message.GetProperty("fps").GetDouble()); break;
@@ -90,6 +92,8 @@ internal sealed class Capture : IDisposable
     readonly GraphicsCaptureItem item;
     readonly ID3D11Device device;
     readonly ID3D11DeviceContext context;
+    readonly GpuWorkMeter? gpuMeter;
+    readonly string? deviceKey;
     readonly ID3D11VideoDevice videoDevice;
     readonly ID3D11VideoContext videoContext;
     readonly IDirect3DDevice winrtDevice;
@@ -98,9 +102,12 @@ internal sealed class Capture : IDisposable
     readonly CaptureBorder border;
     readonly FullscreenDesktopCapture? fullscreen;
     readonly GameHookCapture? gameHook;
+    NativePublisher? publisher;
+    double nextNativePreview;
     bool gameMode;
     string Backend => gameMode ? gameHook!.Backend : desktopMode ? "DXGI-D3D11" : "WGC-D3D11";
     readonly nint targetWindow;
+    readonly bool preferGameHook;
     RectI contentRegion;
     bool regionValid;
     bool placeholderReady;
@@ -133,7 +140,8 @@ internal sealed class Capture : IDisposable
     long sequence;
     bool disposed;
     long frames, dropped, captured;
-    long outputAttempts, outputOverruns;
+    long outputAttempts, outputOverruns, slotReleases;
+    double slotHoldUs;
     double outputWorkUs;
     readonly Stopwatch statsClock = Stopwatch.StartNew();
     long statsTime;
@@ -146,6 +154,7 @@ internal sealed class Capture : IDisposable
         if (parentHandle == 0) throw new System.ComponentModel.Win32Exception();
         // Select the same HWND/device index selected in Discord's source picker.
         targetWindow = FullscreenDesktopCapture.WindowFromSource(source);
+        preferGameHook = WindowCapturePolicy.PreferGameHook(targetWindow);
         bool minimizedAtStart = FullscreenDesktopCapture.IsMinimized(targetWindow);
         item = Native.CreateItem(source);
         inputSize = item.Size;
@@ -165,6 +174,14 @@ internal sealed class Capture : IDisposable
         D3D11CreateDevice(adapter, adapter == null ? DriverType.Hardware : DriverType.Unknown, DeviceCreationFlags.BgraSupport | DeviceCreationFlags.VideoSupport,
             new[] { FeatureLevel.Level_11_1, FeatureLevel.Level_11_0 }, out device, out context).CheckError();
         using (var threaded = context.QueryInterface<ID3D11Multithread>()) threaded.SetMultithreadProtected(true);
+        using (var dxgi = device.QueryInterface<IDXGIDevice>())
+        using (var selectedAdapter = dxgi.GetAdapter())
+        {
+            var desc = selectedAdapter.Description;
+            var driver = selectedAdapter.CheckInterfaceSupport(typeof(ID3D11Device).GUID, out long version);
+            if (driver.Success) deviceKey = $"{desc.VendorId:x}:{desc.DeviceId:x}:{desc.SubsystemId:x}:{version:x}";
+        }
+        gpuMeter = new GpuWorkMeter(device, context);
         videoDevice = device.QueryInterface<ID3D11VideoDevice>();
         videoContext = context.QueryInterface<ID3D11VideoContext>();
         if (fullscreenCompatibility)
@@ -198,8 +215,9 @@ internal sealed class Capture : IDisposable
 
     public void Start()
     {
-        Program.Send(new { type = "ready", protocol = 1, width = outputWidth, height = outputHeight, sourceWidth = inputSize.Width, sourceHeight = inputSize.Height, fps, sourceAvailable, holdingFrame, intervalMs = session.MinUpdateInterval.TotalMilliseconds, backend = "WGC-D3D11", fullscreenCompatibility = fullscreen != null, windowClientOnly = targetWindow != 0, cadence = "paced", adaptivePacing = true, borderControl = true, borderVisible = true });
+        Program.Send(new { type = "ready", protocol = 1, deviceKey, width = outputWidth, height = outputHeight, sourceWidth = inputSize.Width, sourceHeight = inputSize.Height, fps, sourceAvailable, holdingFrame, intervalMs = session.MinUpdateInterval.TotalMilliseconds, backend = "WGC-D3D11", fullscreenCompatibility = fullscreen != null, windowClientOnly = targetWindow != 0, cadence = "paced", adaptivePacing = true, borderControl = true, borderVisible = true });
         session.StartCapture();
+        if (preferGameHook) gameHook?.StartOnce();
         outputThread = new Thread(OutputLoop) { IsBackground = true, Name = "CustomVoice GPU frame pacing" };
         outputThread.Start();
     }
@@ -216,13 +234,41 @@ internal sealed class Capture : IDisposable
         lock (gate)
         {
             if (disposed) return;
+            bool resize = quality != resolution;
             fps = rate; pacingFps = rate; pacingUpdated = 0; quality = resolution;
-            RebuildProcessor();
-            if (gameMode) { cachedReady = false; }
-            else if (desktopMode) { fullscreen?.Invalidate(); desktopEpoch = -1; }
-            else if (regionValid && retainedFrame != null) UpdateCache(retainedFrame);
+            // Progressive conversion has no temporal filter; FPS-only changes
+            // need no processor, texture or cache allocation.
+            if (resize) RebuildProcessor();
+            if (resize && gameMode) { cachedReady = false; }
+            else if (resize && desktopMode) { fullscreen?.Invalidate(); desktopEpoch = -1; }
+            else if (resize && regionValid && retainedFrame != null) UpdateCache(retainedFrame);
             Program.Send(new { type = "configured", request, width = outputWidth, height = outputHeight, sourceWidth = inputSize.Width, sourceHeight = inputSize.Height, fps });
         }
+    }
+
+    public async Task StartPublisher(NativePublisher.Credentials credentials, int request)
+    {
+        NativePublisher? pending = null;
+        try
+        {
+            lock (gate)
+            {
+                if (disposed || publisher != null) throw new InvalidOperationException("Publisher unavailable");
+                pending = publisher = new NativePublisher(device, credentials, Program.Send);
+            }
+            string sid = await pending.Ready.WaitAsync(TimeSpan.FromSeconds(20));
+            lock (gate) { if (disposed || publisher != pending) throw new OperationCanceledException(); }
+            Program.Send(new { type = "publisher-started", request, sid, identity = credentials.Identity });
+        }
+        catch
+        {
+            lock (gate) { if (pending != null && publisher == pending) { publisher = null; pending.Dispose(); } }
+            Program.Send(new { type = "publisher-started", request, error = "NVENC 방송 시작에 실패했습니다. 일반 송출을 사용합니다." });
+        }
+    }
+    public void StopPublisher()
+    {
+        lock (gate) { var previous = publisher; publisher = null; previous?.Dispose(); }
     }
 
     public void SetPacing(double rate)
@@ -339,7 +385,7 @@ internal sealed class Capture : IDisposable
             lastPresentedTexture?.Dispose();
             lastPresentedTexture = device.CreateTexture2D(description);
         }
-        context.CopyResource(lastPresentedTexture, cachedTexture); context.Flush();
+        context.CopyResource(lastPresentedTexture, cachedTexture);
         lastPresentedRevision = revision;
     }
 
@@ -437,7 +483,7 @@ internal sealed class Capture : IDisposable
                 {
                     if (disposed) return;
                     bool desktop = !gameMode && fullscreen?.UpdateTarget() == true;
-                    if (desktop) gameHook?.StartOnce();
+                    if (desktop || preferGameHook) gameHook?.StartOnce();
                     // Hook selection happens in TryOutputFrame. Do not tear its
                     // surface down when the selected game loses foreground.
                     desktop &= !gameMode;
@@ -449,11 +495,12 @@ internal sealed class Capture : IDisposable
                         if (!desktop && !gameMode) UpdateSize(windowSize);
                         Program.Send(new { type = "capture-mode", backend = Backend, fullscreenCompatibility = fullscreen != null, sourceAvailable });
                     }
-                    TryOutputFrame(now);
+                    gpuMeter?.Begin(now);
+                    try { TryOutputFrame(now); } finally { gpuMeter?.End(); }
                     step = 1e6 / EffectiveFps(now);
                     if (statsClock.ElapsedMilliseconds - statsTime >= 2000)
                     {
-                        Program.Send(new { type = "stats", captured, frames, dropped, repeated, conversions, gpuContentions, outputAttempts, outputOverruns, outputWorkUs, sourceAvailable, holdingFrame, sourceAgeMs = lastSourceAt == 0 ? (double?)null : (now - lastSourceAt) / 1000, backend = Backend, pacingFps = EffectiveFps(now), elapsedMs = statsClock.ElapsedMilliseconds });
+                        Program.Send(new { type = "stats", captured, frames, dropped, repeated, conversions, gpuContentions, outputAttempts, outputOverruns, outputWorkUs, publisher = publisher?.Stats, gpuSamples = gpuMeter?.Count ?? 0, gpuWorkUs = gpuMeter?.TotalUs ?? 0, busySlots = slots.Count(s => s.Busy), slotHoldUs, slotReleases, sourceAvailable, holdingFrame, sourceAgeMs = lastSourceAt == 0 ? (double?)null : (now - lastSourceAt) / 1000, backend = Backend, pacingFps = EffectiveFps(now), elapsedMs = statsClock.ElapsedMilliseconds });
                         statsTime = statsClock.ElapsedMilliseconds;
                     }
                 }
@@ -468,7 +515,7 @@ internal sealed class Capture : IDisposable
 
     bool TryOutputFrame(double now)
     {
-        if (!slots.Any(slot => !slot.Busy)) { dropped++; return false; }
+        if (publisher == null && !slots.Any(slot => !slot.Busy)) { dropped++; return false; }
         bool hookFrame = gameHook?.TryRead(fps, (texture, flip) => {
             bool changed = !gameMode;
             gameMode = true; desktopMode = false;
@@ -514,6 +561,16 @@ internal sealed class Capture : IDisposable
             if (targetWindow == 0) return false;
             EnsurePlaceholder();
         }
+        if (publisher != null)
+        {
+            if (desktopMode && !placeholderReady && !fullscreen!.StillEligible()) { cachedReady = false; SetSourceAvailable(false); return false; }
+            RememberPresentedFrame();
+            publisher.Offer(context, cachedTexture!, (long)now, fps);
+            // Local preview must not throttle independent NVENC publishing.
+            // Keep its GPU import/render cost bounded even with a 165 FPS stream.
+            if (now < nextNativePreview || !slots.Any(slot => !slot.Busy)) return true;
+            nextNativePreview = now + 1e6 / 15;
+        }
         foreach (var slot in slots)
         {
             if (slot.Busy) continue;
@@ -541,6 +598,7 @@ internal sealed class Capture : IDisposable
             // Save only a frame that passed the final foreground check and is
             // being submitted. Never freeze an unvalidated desktop cache.
             RememberPresentedFrame();
+            slot.SentAt = now;
             slot.Busy = true; slot.Sequence = ++sequence;
             if (lastOutputRevision == revision) repeated++;
             lastOutputRevision = revision;
@@ -600,6 +658,7 @@ internal sealed class Capture : IDisposable
                     sender.Recreate(winrtDevice, DirectXPixelFormat.B8G8R8A8UIntNormalized, 3, size);
                     return;
                 }
+                if (gameMode || desktopMode) { retainedFrame?.Dispose(); retainedFrame = null; return; }
                 // Keep only the latest source. Conversion belongs to the paced
                 // output worker so input callbacks cannot flood the GPU queue.
                 sourceRevision++;
@@ -632,12 +691,17 @@ internal sealed class Capture : IDisposable
 
     public void Release(int index, long id)
     {
-        lock (gate) if (index >= 0 && index < slots.Length && slots[index].Sequence == id) slots[index].Busy = false;
+        lock (gate) if (index >= 0 && index < slots.Length && slots[index].Busy && slots[index].Sequence == id)
+        {
+            slotHoldUs += Math.Max(0, Microseconds() - slots[index].SentAt); slotReleases++;
+            slots[index].Busy = false;
+        }
     }
 
     public void Dispose()
     {
         border.Dispose();
+        StopPublisher();
         lock (gate)
         {
             if (disposed) return;
@@ -656,6 +720,7 @@ internal sealed class Capture : IDisposable
             cachedView?.Dispose(); cachedTexture?.Dispose();
             lastPresentedTexture?.Dispose(); lastPresentedTexture = null;
             processor?.Dispose(); enumerator?.Dispose();
+            gpuMeter?.Dispose();
             videoContext.Dispose(); videoDevice.Dispose(); context.Dispose(); device.Dispose(); winrtDevice.Dispose();
             Native.CloseHandle(parentHandle);
         }
@@ -664,6 +729,7 @@ internal sealed class Capture : IDisposable
 
     sealed class Slot(int index)
     {
+        public double SentAt;
         public readonly int Index = index;
         public int Width, Height;
         public long Sequence;

@@ -17,7 +17,8 @@ internal sealed class GameHookCapture : IDisposable
     Task<Session>? starting;
     Session? session;
     bool failed, disposed;
-    long firstSurfaceDeadline;
+    long firstSurfaceDeadline, retryAfter;
+    int retries;
     internal bool Active { get; private set; }
     internal string Backend => session?.Info.Type == 0 ? "GAME-HOOK-MEMORY" : "GAME-HOOK-D3D11";
 
@@ -26,7 +27,13 @@ internal sealed class GameHookCapture : IDisposable
 
     internal void StartOnce()
     {
-        if (disposed || starting != null || failed) return;
+        if (disposed) return;
+        if (failed)
+        {
+            if (retries >= 3 || Environment.TickCount64 < retryAfter) return;
+            failed = false; starting = null; retries++;
+        }
+        if (starting != null) return;
         starting = Session.Start(window, stopped.Token);
         Program.Send(new { type = "game-hook", state = "starting", message = "게임 캡처 연결 중" });
     }
@@ -46,6 +53,9 @@ internal sealed class GameHookCapture : IDisposable
         }
         catch (Exception error)
         {
+            // Only an established hook is retried: a denied or unsupported initial
+            // injection must not be repeated in a loop.
+            retryAfter = Active ? Environment.TickCount64 + 30000L * (retries + 1) : long.MaxValue;
             failed = true; Active = false; session?.Dispose(); session = null;
             Program.Send(new { type = "capture-warning", message = $"게임 캡처를 사용할 수 없어 창 캡처를 사용합니다. 알탭 중 영상은 중단될 수 있습니다. {error.Message}" });
             return false;

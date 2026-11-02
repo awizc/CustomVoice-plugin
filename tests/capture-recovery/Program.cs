@@ -94,6 +94,16 @@ using (var videoContext = context.QueryInterface<ID3D11VideoContext>())
         updateGame.Invoke(capture, new object[] { game, false });
         Check(Math.Abs(Luma() - blueTop) <= 1, "Mirror state must not leak into subsequent non-flipped frames.");
         Check(Get<int>("outputWidth") == 64 && Get<int>("outputHeight") == 32 && !Get<bool>("holdingFrame"), "Game buffer dimensions and live state must override the old minimized window crop.");
+        var meterType = typeof(ProcessAudio).Assembly.GetType("GpuWorkMeter")!;
+        using var meter = (IDisposable)Activator.CreateInstance(meterType, flags, null, new object[] { device, context }, null)!;
+        for (int i = 0; i < 30; i++) {
+            meterType.GetMethod("Begin", flags)!.Invoke(meter, new object[] { (double)i * 100000 });
+            updateGame.Invoke(capture, new object[] { game, false });
+            meterType.GetMethod("End", flags)!.Invoke(meter, null);
+            context.Flush(); Thread.Sleep(2);
+        }
+        Check((long)meterType.GetProperty("Count", flags)!.GetValue(meter)! > 0, "Nonblocking GPU timestamp queries must collect completed samples");
+        Check(double.IsFinite((double)meterType.GetProperty("TotalUs", flags)!.GetValue(meter)!), "GPU work duration must be finite");
         Console.WriteLine("PASS: production GPU recovery, held-frame resize, live game frame conversion without window/focus queries, and OpenGL vertical flip/reset.");
     }
     finally

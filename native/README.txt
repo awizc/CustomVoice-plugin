@@ -1,3 +1,9 @@
+native 1.1.15 / 플러그인 1.1.22
+GPU 시간·버퍼 대기 진단, 창 모드 게임 후크, FPS 변경 시 변환기 재사용,
+별도 NVENC 엔진과 서버 지원 시 연결 기능을 포함합니다.
+NVENC는 서버 관리자 기능 추가 전에는 사용하지 않으며 기존 방송으로 동작합니다.
+자세한 서버 작업은 전체 ZIP의 SERVER-NATIVE-SCREEN.md를 참고하세요.
+
 CustomVoice native GPU capture (Windows x64)
 
 native 1.1.14 / 플러그인 1.1.19 업데이트 예약 완료 응답

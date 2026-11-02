@@ -6,6 +6,7 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../native/WindowCapturePolicy.cs" Link="WindowCapturePolicy.cs" />
     <Compile Include="../../native/CaptureGeometry.cs" Link="CaptureGeometry.cs" />
     <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
   </ItemGroup>

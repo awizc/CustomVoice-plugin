@@ -1,0 +1,6 @@
+NvEncSharp NVENC-only binding subset
+https://github.com/jlennox/NvEncSharp
+Commit: af56c52bcc73c1d7d6b00051e842c4549bd18a31
+MIT license. CUDA/decode DLLs are not included or used.
+Local change: removed unused CUDA-only exception constructor.
+Local changes: removed unused CUDA codec-name converter; empty string for missing error text.

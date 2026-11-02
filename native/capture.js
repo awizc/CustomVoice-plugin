@@ -6,7 +6,7 @@ const sessions = new Set();
 // Preserve the requested profile, regulating work offered to a busy encoder.
 function createCadenceController(target) {
   let rate = target, overloaded = 0, healthy = 0, previousTime, previousId, warmup = 0;
-  let elapsed = 0, stableMs = 0, nextProbeAt = 0, probeBackoff = 15000, probe;
+  let elapsed = 0, stableMs = 0, nextProbeAt = 0, probeBackoff = 15000, probe, ramp = 0, stableRate, adaptationGrace = 0;
   function clearFeedback() { overloaded = healthy = stableMs = 0; probe = undefined; }
   function failProbe() {
     rate = probe.from; clearFeedback();
@@ -15,9 +15,13 @@ function createCadenceController(target) {
   }
   return {
     get fps() { return rate; },
-    get diagnostics() { return { cadenceState: probe ? 'probing' : elapsed < nextProbeAt ? 'cooldown' : rate < target ? 'limited' : 'target', probeWaitMs: Math.max(0, nextProbeAt - elapsed) }; },
-    reset(next) { target = rate = next; clearFeedback(); warmup = elapsed = nextProbeAt = 0; probeBackoff = 15000; previousTime = previousId = undefined; },
-    recover() { rate = target; clearFeedback(); nextProbeAt = elapsed; probeBackoff = 15000; warmup = 2; },
+    get diagnostics() { return { cadenceState: ramp ? 'warming' : probe ? 'probing' : elapsed < nextProbeAt ? 'cooldown' : rate < target ? 'limited' : 'target', probeWaitMs: Math.max(0, nextProbeAt - elapsed) }; },
+    reset(next) { target = rate = next; clearFeedback(); warmup = ramp = elapsed = nextProbeAt = adaptationGrace = 0; stableRate = undefined; probeBackoff = 15000; previousTime = previousId = undefined; },
+    recover() {
+      clearFeedback(); nextProbeAt = elapsed; probeBackoff = 15000; warmup = 2; adaptationGrace = 0;
+      rate = target > 60 ? Math.max(60, Math.min(target * 0.75, stableRate ?? target)) : target;
+      ramp = rate < target ? 2 : 0;
+    },
     update(stats, native = {}) {
       const timestamp = stats?.sample?.timestamp;
       let intervalMs = stats?.intervalMs;
@@ -32,12 +36,16 @@ function createCadenceController(target) {
       const sent = stats?.encodeFps, cost = stats?.processingMs;
       // Missing game frames and the low-rate placeholder are source waits,
       // not encoder overload. Discard feedback spanning a capture restart.
-      if (native.sourceAvailable === false) { rate = target; clearFeedback(); warmup = 2; return rate; }
+      if (native.sourceAvailable === false) { rate = target; clearFeedback(); ramp = 0; warmup = 2; return rate; }
       if (!Number.isFinite(sent) || sent < 0) return rate;
       if (intervalMs > 6000) { clearFeedback(); warmup = 1; return rate; }
       intervalMs = Number.isFinite(intervalMs) && intervalMs > 0 ? intervalMs : 1000;
       elapsed += intervalMs;
-      if (warmup > 0) { warmup--; return rate; }
+      if (warmup > 0) {
+        warmup--;
+        if (ramp > 0) { rate += (target - rate) / ramp; ramp--; }
+        return rate;
+      }
       // Counter deltas contain whole frames. Allow one frame per sampling
       // interval so a fractional low pace is not mistaken for lost throughput.
       const rounding = 1000 / intervalMs;
@@ -47,13 +55,18 @@ function createCadenceController(target) {
       const stalled = sent === 0 && stats.captureFps > 1;
       const slowEncoder = (sent === 0 || sent + rounding < offered * 0.82) && (busy || !networkLimited && (stalled || stats.limitation === 'cpu' || Number.isFinite(cost) && cost > 1000 / offered));
       const slowCapture = native.outputOverrunFps > rate * 0.15 && native.outputFps < rate * 0.85 && native.outputWorkMs > 1000 / rate;
-      const slow = slowEncoder || slowCapture;
+      // Give WebRTC's spatial adaptation a bounded opportunity to shed pixels
+      // before a second controller also restricts the input frame cadence.
+      const spatialAdaptation = stats.degradationPreference === 'maintain-framerate' && stats.limitation === 'cpu' && !busy && !slowCapture && sent > 0;
+      adaptationGrace = spatialAdaptation ? adaptationGrace + intervalMs : 0;
+      const slow = slowCapture || slowEncoder && !(spatialAdaptation && adaptationGrace <= 6000);
       overloaded = slow ? overloaded + 1 : 0;
       // powerEfficientEncoder is not a serial/parallel guarantee. Even software
       // codecs can pipeline work, so measured throughput decides recovery.
       const captureReady = !Number.isFinite(native.outputWorkMs) || native.outputWorkMs < 750 / rate;
       const ready = sent > 0 && !slow && !busy && !networkLimited && captureReady;
       healthy = ready && sent + rounding >= rate * 0.95 ? healthy + 1 : 0;
+      if (healthy >= 3) stableRate = rate;
       stableMs = ready && sent + rounding >= rate * 0.82 ? stableMs + intervalMs : 0;
       if (probe) {
         probe.samples++;
@@ -217,7 +230,7 @@ async function start(sourceId, fps, quality, signal, showBorder = true) {
         nativeSampleAgeMs: Number.isFinite(nativeSampleAt) ? Math.max(0, time - nativeSampleAt) : undefined };
     },
     updateEncoderStats(stats) {
-      if (closed) return;
+      if (closed || info?.publisherSid) return;
       const before = cadence.fps, rate = cadence.update(stats, { ...(now() - nativeSampleAt <= 6000 ? diagnostics : undefined), sourceAvailable: info?.sourceAvailable });
       if (nativePacing() && (lastPaceRate !== rate || now() - lastPaceAt >= 3000)) {
         try { bridge.pace(info.session, rate); lastPaceRate = rate; lastPaceAt = now(); }
@@ -229,6 +242,16 @@ async function start(sourceId, fps, quality, signal, showBorder = true) {
       if (Math.abs(before - rate) > 0.5 && typeof customVoiceLog === 'function') customVoiceLog('info', '[CustomVoice] Capture cadence', { target: info?.fps, pacingFps: rate, native: nativePacing(), encodeFps: stats?.encodeFps, encodeMs: stats?.processingMs, outputWorkMs: diagnostics?.outputWorkMs, outputOverrunFps: diagnostics?.outputOverrunFps });
       if (frameTimer && rate > before) { clearTimeout(frameTimer); frameTimer = undefined; drain(); }
     },
+    async startPublisher(credentials) {
+      if (closed || !bridge.startPublisher) throw Error('Native publisher unavailable');
+      const result = await bridge.startPublisher(info.session, credentials);
+      if (closed) throw Error('Capture closed');
+      info = { ...info, publisherSid: result.sid, publisherIdentity: result.identity };
+      cadence.reset(info.fps);
+      if (nativePacing()) bridge.pace(info.session, info.fps);
+      return result;
+    },
+    async stopPublisher() { if (!closed && bridge.stopPublisher) await bridge.stopPublisher(info.session); info = {...info, publisherSid: undefined, publisherStats: undefined}; cadence.reset(info.fps); lastPaceRate = undefined; control.updateEncoderStats(); },
     async configure(nextQuality, nextFps) {
       if (closed) throw new Error('Native capture is closed.');
       if (quality === nextQuality && info.fps === nextFps) return info;
@@ -265,25 +288,33 @@ async function start(sourceId, fps, quality, signal, showBorder = true) {
     if (typeof data.holdingFrame === 'boolean') info = { ...info, holdingFrame: data.holdingFrame };
     if (data.type === 'customvoice-native-status-v2') {
       if (data.event === 'error') fail(new Error(data.message));
-      else if (data.event === 'resized') { info = { ...info, ...data }; recoverCadence(); }
+      else if (data.event === 'resized') {
+        const changed = info.width !== data.width || info.height !== data.height;
+        info = { ...info, ...data }; if (changed) recoverCadence();
+      }
       else if (data.event === 'source-state') sourceState(data.sourceAvailable);
       else if (data.event === 'capture-mode') {
+        const changed = info.backend !== data.backend || info.sourceAvailable !== data.sourceAvailable;
         info = { ...info, ...data };
-        recoverCadence();
+        if (changed) recoverCadence();
         if (typeof customVoiceLog === 'function') customVoiceLog('info', '[CustomVoice] Automatic capture mode', { backend: data.backend, windowClientOnly: info.windowClientOnly });
       } else if (data.event === 'capture-warning') {
         if (typeof customVoiceLog === 'function') customVoiceLog('warn', '[CustomVoice] Fullscreen capture', data.message);
         globalThis.BdApi?.UI?.showToast?.(data.message, { type: 'warning' });
       }
+      else if (data.event === 'publisher-error') { if (!closed) track.dispatchEvent(new Event('customvoicepublishererror')); }
       else if (data.event === 'stats') {
         sourceState(data.sourceAvailable);
+        if (data.publisher) info = {...info, publisherStats: data.publisher, publisherTimestamp: data.elapsedMs};
         nativeSampleAt = now();
         if (lastNativeSample && data.elapsedMs > lastNativeSample.elapsedMs) {
           const seconds = (data.elapsedMs - lastNativeSample.elapsedMs) / 1000;
           const rate = key => Number.isFinite(data[key]) && Number.isFinite(lastNativeSample[key]) && data[key] >= lastNativeSample[key] ? (data[key] - lastNativeSample[key]) / seconds : undefined;
           const attempts = rate('outputAttempts'), work = rate('outputWorkUs');
-          diagnostics = { sourceFps: rate('captured'), outputFps: rate('frames'), repeatedFps: rate('repeated'), backpressureFps: rate('dropped'), conversionFps: rate('conversions'), gpuContentionsFps: rate('gpuContentions'), nativePacingFps: data.pacingFps, sourceAgeMs: data.sourceAgeMs, captureMode: data.backend,
+          diagnostics = { sourceFps: rate('captured'), outputFps: data.publisher && lastNativeSample.publisher ? Math.max(0, data.publisher.frames - lastNativeSample.publisher.frames) / seconds : rate('frames'), previewFps: data.publisher ? rate('frames') : undefined, repeatedFps: rate('repeated'), backpressureFps: rate('dropped'), conversionFps: rate('conversions'), gpuContentionsFps: rate('gpuContentions'), nativePacingFps: data.pacingFps, sourceAgeMs: data.sourceAgeMs, captureMode: data.backend,
             preImportDropFps: Math.max(0, preImportDropped - previousImportDropped) / seconds,
+            gpuWorkMs: rate('gpuSamples') > 0 ? rate('gpuWorkUs') / rate('gpuSamples') / 1000 : undefined,
+            busySlots: data.busySlots, slotHoldMs: rate('slotReleases') > 0 ? rate('slotHoldUs') / rate('slotReleases') / 1000 : undefined,
             outputWorkMs: attempts > 0 && Number.isFinite(work) ? work / attempts / 1000 : undefined, outputOverrunFps: rate('outputOverruns') };
         }
         lastNativeSample = data;

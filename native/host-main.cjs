@@ -57,6 +57,16 @@ function install({ allowTest = false } = {}) {
       function navigation(_event, _url, isInPlace, isMainFrame) { if (isMainFrame && !isInPlace) close(new Error('Capture owner navigated.')); }
       const session = {
         owner, close, send, activate: () => { active = true; },
+        startPublisher(credentials) {
+          if (!credentials || typeof credentials.url !== 'string' || typeof credentials.token !== 'string' || typeof credentials.identity !== 'string' || typeof credentials.owner !== 'string' || credentials.token.length > 12000 || credentials.identity === credentials.owner || !credentials.identity.startsWith('cv-screen:') || !Number.isInteger(credentials.bitrate) || credentials.bitrate < 250000 || credentials.bitrate > 100000000) throw Error('Invalid publisher configuration');
+          const url = new URL(credentials.url); if (url.protocol !== 'wss:' || url.username || url.password) throw Error('Invalid publisher endpoint');
+          return new Promise((resolve, reject) => {
+            const request = ++serial;
+            const timer = setTimeout(() => { requests.delete(request); send({type:'publisher-stop'}); reject(Error('Native publisher startup timed out')); }, 22000);
+            requests.set(request, {resolve, reject, timer});
+            send({type:'publisher-start',request,url:credentials.url,token:credentials.token,identity:credentials.identity,owner:credentials.owner,bitrate:credentials.bitrate});
+          });
+        },
         setBorder(visible) {
           if (typeof visible !== 'boolean') throw new Error('Invalid capture border setting.');
           return new Promise((done, failed) => {
@@ -91,13 +101,13 @@ function install({ allowTest = false } = {}) {
             const message = JSON.parse(line);
             if (message.type === 'ready') {
               if (message.protocol !== 1 || message.intervalMs > 1.1) throw new Error('Unsupported native capture protocol.');
-              clearTimeout(timer); started = true; resolve({ ...message, session: id, hostVersion: '1.1.14', hostAdaptivePacing: true, hostBorderControl: true });
+              clearTimeout(timer); started = true; resolve({ ...message, session: id, hostVersion: '1.1.15', hostAdaptivePacing: true, hostBorderControl: true });
             } else if (message.type === 'frame') {
               if (active) notify('frame', message);
               else send({ type: 'release', slot: message.slot, sequence: message.sequence });
-            } else if (message.type === 'configured' || message.type === 'border') {
+            } else if (message.type === 'configured' || message.type === 'border' || message.type === 'publisher-started') {
               const pending = requests.get(message.request);
-              if (pending) { clearTimeout(pending.timer); requests.delete(message.request); pending.resolve(message); }
+              if (pending) { clearTimeout(pending.timer); requests.delete(message.request); message.error ? pending.reject(Error(message.error)) : pending.resolve(message); }
             } else if (message.type === 'error') fail(new Error(message.message));
             else notify('status', message);
           }
@@ -111,6 +121,8 @@ function install({ allowTest = false } = {}) {
     });
   });
   ipcMain.handle(prefix + 'activate', (event, id) => { owned(event, id).activate(); });
+  ipcMain.handle(prefix + 'publisher-start', (event, id, credentials) => owned(event, id).startPublisher(credentials));
+  ipcMain.handle(prefix + 'publisher-stop', (event, id) => owned(event, id).send({type:'publisher-stop'}));
   ipcMain.handle(prefix + 'configure', (event, id, fps, quality) => owned(event, id).configure(fps, quality));
   ipcMain.handle(prefix + 'border', (event, id, visible) => owned(event, id).setBorder(visible));
   ipcMain.handle(prefix + 'stop', (event, id) => { trusted(event); const session = sessions.get(id); if (session?.owner === event.sender) session.close(); });

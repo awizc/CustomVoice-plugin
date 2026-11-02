@@ -97,3 +97,8 @@ using (var videoContext = context.QueryInterface<ID3D11VideoContext>())
     Convert(1297, 760, odd);
     Console.WriteLine("PASS: synthetic BGRA to NV12 GPU conversion for cropped, fullscreen and odd-sized inputs.");
 }
+
+Check(WindowCapturePolicy.IsGame("osu!", "WindowsForms10.Window"), "Windowed osu should use game capture");
+Check(WindowCapturePolicy.IsGame("game", "UnityWndClass"), "Borderless/windowed Unity should use game capture");
+Check(!WindowCapturePolicy.IsGame("Discord", "Chrome_WidgetWin_1"), "Do not inject into generic Chromium windows");
+Check(!WindowCapturePolicy.IsGame("explorer", "CabinetWClass"), "Do not inject into ordinary desktop apps");

@@ -20,3 +20,11 @@ The .NET runtime (Microsoft Corporation) is bundled in the portable distribution
 See licenses/dotnet-runtime-LICENSE.TXT and
 licenses/dotnet-runtime-THIRD-PARTY-NOTICES.TXT for its license and notices.
 The development-only Electron smoke harness and .NET SDK are not distributed.
+
+NvEncSharp NVENC-only bindings (Joseph Lennox), MIT license.
+Source revision and local modifications: native/nvenc/SOURCE.txt in repository.
+See licenses/NvEncSharp-LICENSE.txt. NVIDIA's driver supplies nvEncodeAPI64.dll;
+no NVIDIA driver or CUDA runtime binary is redistributed.
+
+CustomVoice.Publisher uses the LiveKit Go SDK, Pion WebRTC and the Go runtime.
+See licenses/publisher-licenses.txt for linked component licenses.

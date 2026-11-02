@@ -14,6 +14,11 @@
   <ItemGroup>
     <Compile Include="Program.cs" />
     <Compile Include="FramePacer.cs" />
+    <Compile Include="GpuWorkMeter.cs" />
+    <Compile Include="NvencEncoder.cs" />
+    <Compile Include="NativePublisher.cs" />
+    <Compile Include="nvenc/*.cs" />
+    <Compile Include="WindowCapturePolicy.cs" />
     <Compile Include="CaptureBorder.cs" />
     <Compile Include="CaptureGeometry.cs" />
     <Compile Include="WindowSources.cs" />

@@ -2,7 +2,7 @@
 const fs=require('fs'),path=require('path');
 const file=path.join(__dirname,'..','CustomVoice.plugin.js');
 let bundle=fs.readFileSync(file,'utf8');
-const code=['process-audio.js','voice-extras.js','broadcast-viewers.js','screen-recovery.js','discord-theme.js'].map(name=>fs.readFileSync(path.join(__dirname,name),'utf8')).join('\n');
+const code=['process-audio.js','voice-extras.js','broadcast-viewers.js','screen-recovery.js','discord-theme.js','encoder-history.js','native-broadcast.js'].map(name=>fs.readFileSync(path.join(__dirname,name),'utf8')).join('\n');
 const block='// <CustomVoiceFeatures>\n'+code+'\n// </CustomVoiceFeatures>\n';
 if(bundle.includes('// <CustomVoiceFeatures>'))bundle=bundle.replace(/\/\/ <CustomVoiceFeatures>[\s\S]*?\/\/ <\/CustomVoiceFeatures>\r?\n/,()=>block);
 else bundle=bundle.replace('// src/services/session.ts',()=>block+'\n// src/services/session.ts');

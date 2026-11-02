@@ -422,3 +422,13 @@ test('DOM placement checks render once per mount and remount on parent changes',
   adapter.sync(false);
   assert.equal(unmounts, 2);
 });
+
+test('receiver freeze and jitter counters use deltas and reset with the track',()=>{
+ const api=load(playbackCode);
+ const report=(id,timestamp,framesDecoded,freezeCount,totalFreezesDuration,jitterBufferDelay,jitterBufferEmittedCount)=>new Map([[id,{id,type:'inbound-rtp',kind:'video',timestamp,framesDecoded,freezeCount,totalFreezesDuration,jitterBufferDelay,jitterBufferEmittedCount}]]);
+ const first=api.readScreenStats(report('a',1000,60,1,.5,2,60),undefined,false);
+ const next=api.readScreenStats(report('a',3000,180,3,1.5,8,180),first.sample,false);
+ assert.equal(next.freezes,2);assert.equal(next.freezeDuration,1);assert.equal(next.jitterBufferMs,50);
+ const reset=api.readScreenStats(report('b',4000,0,0,0,0,0),next.sample,false);
+ assert.equal(reset.freezes,undefined);assert.equal(reset.jitterBufferMs,undefined);
+});
