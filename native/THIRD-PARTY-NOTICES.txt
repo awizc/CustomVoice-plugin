@@ -1,0 +1,17 @@
+Runtime components shipped with CustomVoice native capture:
+
+Vortice.Windows / Direct3D11, DirectX, DXGI 3.8.3 (Amer Koleci and contributors)
+Vortice.Mathematics 2.1.0 (Amer Koleci and contributors)
+SharpGen.Runtime and SharpGen.Runtime.COM (SharpGenTools contributors)
+CsWinRT / WinRT.Runtime (Microsoft Corporation)
+These components use the MIT license; see the accompanying licenses directory.
+
+Microsoft.Windows.SDK.NET projection from Microsoft.Windows.SDK.NET.Ref
+10.0.26100.57 (Microsoft Corporation) is subject to the Windows SDK license:
+https://aka.ms/WinSDKLicenseURL
+Package details: https://www.nuget.org/packages/Microsoft.Windows.SDK.NET.Ref/10.0.26100.57
+
+The .NET runtime (Microsoft Corporation) is bundled in the portable distribution.
+See licenses/dotnet-runtime-LICENSE.TXT and
+licenses/dotnet-runtime-THIRD-PARTY-NOTICES.TXT for its license and notices.
+The development-only Electron smoke harness and .NET SDK are not distributed.

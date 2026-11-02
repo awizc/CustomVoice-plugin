@@ -1,0 +1,13 @@
+dist/
+**/bin/
+**/obj/
+native/publish/
+**/node_modules/
+**/logs/
+*.log
+*.config.json
+.env*
+*.bak
+*.update-tmp
+github-token.bin
+REVIEW-NOTES.txt

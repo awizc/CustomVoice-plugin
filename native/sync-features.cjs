@@ -1,0 +1,11 @@
+'use strict';
+const fs=require('fs'),path=require('path');
+const file=path.join(__dirname,'..','CustomVoice.plugin.js');
+let bundle=fs.readFileSync(file,'utf8');
+const code=['process-audio.js','voice-extras.js'].map(name=>fs.readFileSync(path.join(__dirname,name),'utf8')).join('\n');
+const block='// <CustomVoiceFeatures>\n'+code+'\n// </CustomVoiceFeatures>\n';
+if(bundle.includes('// <CustomVoiceFeatures>'))bundle=bundle.replace(/\/\/ <CustomVoiceFeatures>[\s\S]*?\/\/ <\/CustomVoiceFeatures>\r?\n/,()=>block);
+else bundle=bundle.replace('// src/services/session.ts',()=>block+'\n// src/services/session.ts');
+const updater=fs.readFileSync(path.join(__dirname,'plugin-updater.js'),'utf8');
+bundle=bundle.replace(/var PluginUpdater = class \{[\s\S]*?\n};\r?\n\r?\n\/\/ src\/index.ts/,()=>updater+'\n\n// src/index.ts');
+fs.writeFileSync(file,bundle);
