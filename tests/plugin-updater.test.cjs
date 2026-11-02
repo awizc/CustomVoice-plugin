@@ -132,21 +132,21 @@ function panelHarness(info,loaded='1.1.15'){
 }
 
 test('native panel distinguishes loaded and verified disk versions after update',async()=>{
-  const h=panelHarness({installedVersion:'1.1.16',latestVersion:'1.1.16',available:false,installationValid:true,pending:{state:'installed',version:'1.1.16'}});
+  const h=panelHarness({installedVersion:'1.1.17',latestVersion:'1.1.17',available:false,installationValid:true,pending:{state:'installed',version:'1.1.17'}});
   await new Promise(setImmediate);
-  assert.match(h.version.textContent,/실행 중: 1\.1\.15/);assert.match(h.version.textContent,/설치된 native: 1\.1\.16/);
+  assert.match(h.version.textContent,/실행 중: 1\.1\.15/);assert.match(h.version.textContent,/설치된 native: 1\.1\.17/);
   assert.match(h.version.textContent,/완전 재시작 필요/);assert.match(h.status.textContent,/완전히 종료/);assert.equal(h.install.disabled,true);h.close();
 });
 
 test('native panel offers same-version repair and respects a real waiting reason',async()=>{
-  const h=panelHarness({installedVersion:'1.1.16',latestVersion:'1.1.16',available:true,repairRequired:true,installationValid:false,pending:{state:'failed',version:'1.1.16',message:'설치 파일 손상'}});
+  const h=panelHarness({installedVersion:'1.1.17',latestVersion:'1.1.17',available:true,repairRequired:true,installationValid:false,pending:{state:'failed',version:'1.1.17',message:'설치 파일 손상'}});
   await new Promise(setImmediate);
   assert.match(h.status.textContent,/설치 파일 손상/);assert.equal(h.install.textContent,'구성요소 복구');assert.equal(h.install.disabled,false);
   await h.install.listeners.click();assert.equal(h.prepares(),1);assert.match(h.status.textContent,/테스트 적용 대기/);assert.equal(h.install.disabled,true);h.close();
 });
 
 test('native panel does not promote disk version from an old completion status',async()=>{
-  const h=panelHarness({installedVersion:'1.1.15',latestVersion:'1.1.16',available:true,pending:{state:'installed',version:'1.1.16'}});
+  const h=panelHarness({installedVersion:'1.1.15',latestVersion:'1.1.17',available:true,pending:{state:'installed',version:'1.1.17'}});
   await new Promise(setImmediate);
   assert.match(h.version.textContent,/설치된 native: 1\.1\.15/);assert.equal(h.install.disabled,false);h.close();
 });

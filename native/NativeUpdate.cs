@@ -6,7 +6,7 @@ using System.Text.RegularExpressions;
 
 internal static class NativeUpdate
 {
-    internal const string CurrentVersion = "1.1.16";
+    internal const string CurrentVersion = "1.1.17";
     static string Plugins => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "BetterDiscord", "plugins");
     static string Root => Path.Combine(Path.GetDirectoryName(Plugins)!, "data", "CustomVoice", "native-updates");
     static string StateFile => Path.Combine(Root, "status.json");
@@ -89,10 +89,13 @@ internal static class NativeUpdate
             throw new InvalidDataException("native 업데이트 정보가 올바르지 않습니다.");
         return meta;
     }
+    // GitHub can cache the /latest redirect despite Cache-Control: no-cache.
+    // Bypass only the moving metadata URL; versioned assets remain cacheable.
+    internal static Uri LatestMetadataUrl() => new($"https://github.com/{GithubUpdate.Repository}/releases/latest/download/CustomVoice-native.json?check={Guid.NewGuid():N}");
     static async Task<Release> Latest(HttpClient http, CancellationToken cancellation)
     {
         using var memory = new MemoryStream();
-        await GithubUpdate.Download(http, new Uri($"https://github.com/{GithubUpdate.Repository}/releases/latest/download/CustomVoice-native.json"), memory, 16384, cancellation);
+        await GithubUpdate.Download(http, LatestMetadataUrl(), memory, 16384, cancellation);
         var meta = ParseMetadata(memory.ToArray());
         return new(meta, new Uri($"https://github.com/{GithubUpdate.Repository}/releases/download/v{meta.packageVersion}/{meta.file}"));
     }

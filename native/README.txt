@@ -1,4 +1,4 @@
-CustomVoice native 1.1.16
+CustomVoice native 1.1.17
 
 Windows 11 24H2 이상(x64)용 캡처·앱 오디오·NVENC 송출 도우미입니다.
 전체 ZIP을 풀고 Discord를 완전히 종료한 뒤 Install.cmd를 실행하세요.

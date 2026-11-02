@@ -1,4 +1,4 @@
-CustomVoice 1.1.23 / native 1.1.16
+CustomVoice 1.1.24 / native 1.1.17
 Windows 11 24H2 이상(x64), BetterDiscord 필요
 
 1. ZIP을 전부 풉니다.

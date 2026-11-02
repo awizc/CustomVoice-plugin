@@ -1,8 +1,8 @@
 /**
  * @name CustomVoice
  * @author CustomVoice contributors
- * @version 1.1.23
- * @nativeVersion 1.1.16
+ * @version 1.1.24
+ * @nativeVersion 1.1.17
  * @description Independent LiveKit voice channels inside Discord.
  * @source https://github.com/awizc/CustomVoice-plugin
  * @updateUrl https://raw.githubusercontent.com/awizc/CustomVoice-plugin/main/CustomVoice.plugin.js
@@ -57218,7 +57218,7 @@ function createServerSetup(manager, compat) {
 }
 
 // package.json
-var version3 = "1.1.23";
+var version3 = "1.1.24";
 
 // src/components/settings.ts
 function createSettingsPanel(manager, compat) {
@@ -59980,7 +59980,7 @@ function createNativeUpdatePanel() {
     try{
       const result=await bridge().checkNativeUpdate();if(disposed||request!==revision)return;info=result;
       status.textContent=result.repairRequired?(result.message||'설치 파일을 복구해야 합니다.') :result.available?`native ${result.latestVersion} 업데이트가 있습니다.`:globalThis.CustomVoiceNative?.version!==result.installedVersion?'최신 native 설치 완료. Discord를 완전히 종료한 뒤 다시 실행하면 적용됩니다.':'native는 최신 버전입니다.';
-      const required='1.1.16';
+      const required='1.1.17';
       if(newerVersion(required,result.installedVersion)&&newerVersion(required,result.latestVersion))status.textContent=`이 플러그인에 필요한 native ${required}가 정식 릴리스에 아직 없습니다. 전체 ZIP으로 업데이트해 주세요.`;
       if(result.pending&&['downloading','waiting','applying','failed'].includes(result.pending.state))showState(result.pending);
       else {pending=result.pending;clearTimeout(timer);}

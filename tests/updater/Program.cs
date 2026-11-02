@@ -35,6 +35,10 @@ internal static class Program
             }
             finally { if (!child.HasExited) { child.Kill(); await child.WaitForExitAsync(); } }
         }
+        var firstMetadata = NativeUpdate.LatestMetadataUrl(); var nextMetadata = NativeUpdate.LatestMetadataUrl();
+        Check(firstMetadata != nextMetadata && firstMetadata.Query.Length > 1 && GithubUpdate.TrustedDownload(firstMetadata), "Latest metadata must bypass stale GitHub redirect caches");
+        Check(firstMetadata.AbsolutePath == "/awizc/CustomVoice-plugin/releases/latest/download/CustomVoice-native.json", "Metadata cache bypass changed download destination");
+        Console.WriteLine("PASS: latest metadata requests bypass stale redirects without changing trusted destination");
         string repo = "https://github.com/awizc/CustomVoice-plugin/releases/";
         var url = new Uri(repo + "latest/download/CustomVoice-native.json");
         foreach (string invalid in new[] { "http://github.com/awizc/CustomVoice-plugin/releases/x", "https://evil.example/file", "https://github.com/other/repo/releases/x", "https://github.com:444/awizc/CustomVoice-plugin/releases/x", "https://user@github.com/awizc/CustomVoice-plugin/releases/x", "https://github.com.evil.example/x", "https://raw.githubusercontent.com/other/repo/main/x" })
