@@ -7,5 +7,7 @@ const block='// <CustomVoiceFeatures>\n'+code+'\n// </CustomVoiceFeatures>\n';
 if(bundle.includes('// <CustomVoiceFeatures>'))bundle=bundle.replace(/\/\/ <CustomVoiceFeatures>[\s\S]*?\/\/ <\/CustomVoiceFeatures>\r?\n/,()=>block);
 else bundle=bundle.replace('// src/services/session.ts',()=>block+'\n// src/services/session.ts');
 const updater=fs.readFileSync(path.join(__dirname,'plugin-updater.js'),'utf8');
-bundle=bundle.replace(/var PluginUpdater = class \{[\s\S]*?\n};\r?\n\r?\n\/\/ src\/index.ts/,()=>updater+'\n\n// src/index.ts');
+const updaterStart=bundle.indexOf('var PluginUpdater = class {'),updaterEnd=bundle.indexOf('// src/index.ts',updaterStart);
+if(updaterStart<0||updaterEnd<0)throw Error('Updater insertion point is missing');
+bundle=bundle.slice(0,updaterStart)+updater+'\n\n'+bundle.slice(updaterEnd);
 fs.writeFileSync(file,bundle);

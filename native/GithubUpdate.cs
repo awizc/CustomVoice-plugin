@@ -35,16 +35,20 @@ internal static class GithubUpdate
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
         Program.Send(new { configured = true });
     }
-    internal static async Task Fetch()
+    internal static HttpClient Client()
     {
         if (!File.Exists(TokenFile)) throw new InvalidOperationException("업데이트 설정에서 private 저장소 읽기 권한이 있는 GitHub 토큰을 등록해 주세요.");
         string token = Encoding.UTF8.GetString(Protect(File.ReadAllBytes(TokenFile), true));
-        using var handler = new HttpClientHandler { AllowAutoRedirect = false };
-        using var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(20), MaxResponseContentBufferSize = 8 * 1024 * 1024 };
+        var http = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(20), MaxResponseContentBufferSize = 8 * 1024 * 1024 };
         http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
-        http.DefaultRequestHeaders.UserAgent.ParseAdd("CustomVoice-Updater/1.1.0");
+        http.DefaultRequestHeaders.UserAgent.ParseAdd("CustomVoice-Updater/1.1.1");
         http.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");
         http.DefaultRequestHeaders.CacheControl = new CacheControlHeaderValue { NoCache = true };
+        return http;
+    }
+    internal static async Task Fetch()
+    {
+        using var http = Client();
         using var reference = await http.GetAsync($"https://api.github.com/repos/{Repository}/git/ref/heads/main");
         if (!reference.IsSuccessStatusCode) throw new InvalidOperationException($"GitHub 업데이트 인증/접근 실패 (HTTP {(int)reference.StatusCode}). 저장소 읽기 권한을 확인해 주세요.");
         using var document = JsonDocument.Parse(await reference.Content.ReadAsStringAsync());

@@ -32,7 +32,14 @@ BetterDiscord용 음성·방송 플러그인과 Windows native 캡처 도우미�
 설정의 **GitHub 업데이트 토큰**에서 등록하거나 삭제할 수 있습니다.
 토큰은 소스/일반 설정에 저장하지 않고 현재 Windows 사용자용 DPAPI로 암호화해
 `%APPDATA%/BetterDiscord/data/CustomVoice/github-token.bin`에 저장합니다.
-자동 확인은 통화·방송 중에는 적용하지 않습니다. native 변경이 필요한 버전은 전체 ZIP 설치를 안내합니다.
+플러그인 파일은 시작 후와 매시간 자동으로 확인하고 새 버전이 있으면 갱신합니다.
+통화·방송 중에는 적용하지 않습니다. native 버전이 오래되어도 플러그인 파일 업데이트는 진행하며 native 업데이트를 안내합니다.
+native는 **BetterDiscord 설정 → 플러그인 → CustomVoice 설정 → native 업데이트**를 눌렀을 때만 받습니다.
+현재 버전과 새 버전을 따로 표시하며, 새 버전이 있을 때 버튼이 활성화됩니다.
+다운로드가 끝나면 Discord를 트레이에서 완전히 종료하세요. native만 자동 적용하므로 기존 플러그인 파일과 설정은 덮어쓰지 않습니다.
+종료 후 5초 정도 기다렸다가 다시 실행하세요. 파일이 사용 중이면 더 기다리며 실패 시 설정창에 오류를 표시합니다.
+예약은 최대 24시간 유지됩니다. 중단·실패하면 설정에서 새 버전 확인 후 다시 업데이트할 수 있습니다.
+처음 이 기능을 사용하는 기존 1.1.0 사용자는 1.1.1 전체 ZIP 설치가 한 번 필요합니다.
 다른 사용자에게 ZIP을 전달해 설치하는 것은 가능하며, 자동 업데이트에는 각자의 저장소 권한과 토큰이 필요합니다.
 
 ## 개발 및 패키지 생성
@@ -46,6 +53,10 @@ BetterDiscord용 음성·방송 플러그인과 Windows native 캡처 도우미�
 `native/sync-renderer.cjs`가 native 캡처 및 기능 모듈을 배포용 `CustomVoice.plugin.js`에 반영합니다.
 `native/plugin-updater.js`, `native/process-audio.js`, `native/voice-extras.js`가 신규 기능의 편집 원본입니다.
 생성물은 `dist/CustomVoice-<버전>-windows-x64.zip`입니다.
+릴리스를 배포할 때 같은 빌드에서 생성한 `dist/CustomVoice-native.json`도 ZIP과 함께 업로드합니다.
+이 파일은 native 버전과 ZIP의 SHA-256을 담습니다. 태그는 `v<플러그인 버전>` 형식이며 정식 최신 릴리스만 사용합니다.
+플러그인만 변경한 릴리스에서는 `@nativeVersion`과 native 버전을 유지하고 `-ReuseNativeBuild`로 패키징합니다.
+native 변경 시 `@nativeVersion`, host/preload 버전, `NativeUpdate.CurrentVersion`을 함께 올립니다.
 이번 변경에서는 배포 파일 생성에 필요한 빌드만 수행하고 테스트·실측·computer-use는 실행하지 않았습니다.
 기존 테스트 코드는 참고용으로 포함되어 있습니다.
 

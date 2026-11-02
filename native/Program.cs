@@ -33,6 +33,10 @@ internal static class Program
         {
             if (args.Length == 1 && args[0] == "--store-update-token") { GithubUpdate.Save(); return 0; }
             if (args.Length == 1 && args[0] == "--update-source") { await GithubUpdate.Fetch(); return 0; }
+            if (args.Length == 1 && args[0] == "--native-update-check") { await NativeUpdate.Check(); return 0; }
+            if (args.Length == 1 && args[0] == "--native-update-prepare") { await NativeUpdate.Prepare(); return 0; }
+            if (args.Length == 1 && args[0] == "--native-update-status") { Program.Send(NativeUpdate.Status()); return 0; }
+            if (args.Length == 1 && args[0] == "--apply-native-update") return await NativeUpdate.ApplyAfterExit();
             if (args.Length == 3 && args[0] == "--process-audio") return ProcessAudio.Run(int.Parse(args[1]), args[2]);
             if (args.Length == 1 && args[0] is "--install" or "--remove")
                 return NativeInstaller.Run(args[0] == "--remove");

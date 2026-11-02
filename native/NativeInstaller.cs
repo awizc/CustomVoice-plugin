@@ -76,7 +76,7 @@ internal static class NativeInstaller
         return result;
     }
 
-    internal static string Install(string payloadDirectory, string pluginsDirectory, bool remove = false)
+    internal static string Install(string payloadDirectory, string pluginsDirectory, bool remove = false, bool nativeOnly = false)
     {
         payloadDirectory = Path.GetFullPath(payloadDirectory);
         pluginsDirectory = Path.GetFullPath(pluginsDirectory);
@@ -107,10 +107,15 @@ internal static class NativeInstaller
             if (!manifestPath.Equals(targetManifest, StringComparison.OrdinalIgnoreCase)) copies.Add((manifestPath, targetManifest));
             string plugin = Path.GetFullPath(Path.Combine(payloadDirectory, "..", "CustomVoice.plugin.js"));
             string targetPlugin = Path.Combine(pluginsDirectory, "CustomVoice.plugin.js");
-            if (File.Exists(plugin) && !plugin.Equals(targetPlugin, StringComparison.OrdinalIgnoreCase)) copies.Add((plugin, targetPlugin));
+            if (!nativeOnly && File.Exists(plugin) && !plugin.Equals(targetPlugin, StringComparison.OrdinalIgnoreCase)) copies.Add((plugin, targetPlugin));
         }
         bool archiveChanged = !original.AsSpan().SequenceEqual(updated);
         if (!archiveChanged && copies.Count == 0) return "이미 설치되어 있습니다.";
+        // A short-lived status/download helper can outlive Discord. Detect its
+        // file locks before creating backups or changing any installed files.
+        if (nativeOnly)
+            foreach (var (_, target) in copies)
+                if (File.Exists(target)) { using var available = new FileStream(target, FileMode.Open, FileAccess.ReadWrite, FileShare.None); }
         string backup = Path.Combine(dataDirectory, "CustomVoice-install-backups", DateTime.Now.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(backup);
         File.WriteAllBytes(Path.Combine(backup, "betterdiscord.asar"), original);
@@ -118,6 +123,7 @@ internal static class NativeInstaller
         string temporary = archive + ".customvoice-" + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
+            if (nativeOnly && DiscordRunning()) throw new IOException("Discord가 다시 실행되어 native 설치를 연기합니다.");
             foreach (var (source, target) in copies)
             {
                 string? saved = null;
@@ -144,7 +150,17 @@ internal static class NativeInstaller
             throw;
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
-        return (remove ? "네이티브 연결을 해제했습니다." : "플러그인과 네이티브 캡처 설치를 완료했습니다.") + "\n백업: " + backup;
+        return (remove ? "네이티브 연결을 해제했습니다." : nativeOnly ? "native 업데이트를 완료했습니다." : "플러그인과 네이티브 캡처 설치를 완료했습니다.") + "\n백업: " + backup;
+    }
+
+    internal static bool DiscordRunning()
+    {
+        bool running = false;
+        foreach (var process in Process.GetProcesses())
+            using (process)
+                try { if (new[] { "Discord", "DiscordPTB", "DiscordCanary", "DiscordDevelopment" }.Contains(process.ProcessName, StringComparer.OrdinalIgnoreCase)) running = true; }
+                catch (InvalidOperationException) { }
+        return running;
     }
 
     internal static int Run(bool remove)

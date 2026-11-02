@@ -15,6 +15,8 @@ if ($ReuseNativeBuild) {
 $sourcePlugin = Join-Path $PSScriptRoot 'CustomVoice.plugin.js'
 $version = [regex]::Match([IO.File]::ReadAllText($sourcePlugin), '@version\s+(\d+\.\d+\.\d+)').Groups[1].Value
 if (-not $version) { throw 'Plugin version is missing' }
+$nativeVersion = [regex]::Match([IO.File]::ReadAllText($sourcePlugin), '@nativeVersion\s+(\d+\.\d+\.\d+)').Groups[1].Value
+if (-not $nativeVersion) { throw 'Native version is missing' }
 $dist = Join-Path $PSScriptRoot 'dist'
 $stage = Join-Path $dist ('CustomVoice-' + $version + '-windows-x64-' + [DateTime]::Now.ToString('yyyyMMdd-HHmmss'))
 $nativeTarget = Join-Path $stage 'CustomVoice.native'
@@ -24,6 +26,7 @@ Get-ChildItem -LiteralPath $published -File | Where-Object { $_.Extension -ne '.
     Copy-Item -LiteralPath $_.FullName -Destination $nativeTarget
 }
 Copy-Item -LiteralPath (Join-Path $published 'licenses') -Destination $nativeTarget -Recurse
+[IO.File]::WriteAllText((Join-Path $nativeTarget 'native-version.json'), (ConvertTo-Json @{ version = $nativeVersion }), [Text.UTF8Encoding]::new($false))
 Copy-Item -LiteralPath $sourcePlugin -Destination $stage
 Copy-Item -LiteralPath (Join-Path $published 'Install.cmd') -Destination $stage
 [IO.File]::WriteAllText((Join-Path $stage 'INSTALL.txt'), "압축을 전부 풀고 Discord를 완전히 종료한 뒤 Install.cmd를 더블클릭하세요.`r`nNode.js와 .NET을 따로 설치할 필요가 없습니다.`r`n썸네일은 송출자와 시청자 모두 1.1.0 이상이 필요합니다. 업데이트 후 Discord를 완전히 재시작하세요.`r`nprivate 자동 업데이트에는 awizc/CustomVoice-plugin 저장소 접근 권한과 각자의 GitHub 토큰이 필요합니다. 공유받은 ZIP은 인증 없이 설치할 수 있습니다.`r`n", [Text.UTF8Encoding]::new($true))
@@ -38,4 +41,6 @@ if (Test-Path -LiteralPath $zip) {
     Move-Item -LiteralPath $zip -Destination $previous
 }
 [IO.Compression.ZipFile]::CreateFromDirectory($stage, $zip, [IO.Compression.CompressionLevel]::Optimal, $false)
-[pscustomobject]@{ Zip = $zip; Directory = $stage; SizeMiB = [Math]::Round((Get-Item -LiteralPath $zip).Length / 1MB, 1) } | ConvertTo-Json
+$nativeMetadata = Join-Path $dist 'CustomVoice-native.json'
+[IO.File]::WriteAllText($nativeMetadata, (ConvertTo-Json @{ schema = 1; nativeVersion = $nativeVersion; packageVersion = $version; file = [IO.Path]::GetFileName($zip); sha256 = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant() }), [Text.UTF8Encoding]::new($false))
+[pscustomobject]@{ Zip = $zip; Directory = $stage; NativeMetadata = $nativeMetadata; SizeMiB = [Math]::Round((Get-Item -LiteralPath $zip).Length / 1MB, 1) } | ConvertTo-Json

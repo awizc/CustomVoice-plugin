@@ -1,5 +1,14 @@
 CustomVoice native GPU capture (Windows x64)
 
+1.1.1 업데이트 방식
+- 플러그인 JS만 시작 후/매시간 자동 업데이트합니다. 통화·방송 중에는 적용을 미룹니다.
+- native는 BetterDiscord의 CustomVoice 설정에서 새 버전 확인 후 업데이트 버튼으로 받습니다.
+- GitHub 최신 정식 릴리스의 ZIP 및 CustomVoice-native.json을 사용합니다.
+- 다운로드 완료 후 Discord를 완전히 종료하면 native만 설치하며 플러그인 JS와 설정은 유지합니다.
+- 종료 후 5초 정도 기다렸다가 다시 실행하세요. 예약 대기는 최대 24시간입니다.
+- 사용 중인 파일 교체 실패 시 기존 파일을 복원하고 설정창에 실패 원인을 표시합니다.
+- private 저장소 접근에는 기존 암호화된 GitHub 토큰을 그대로 사용합니다.
+
 1.1.0
 - 저장소/업데이트 경로: https://github.com/awizc/CustomVoice-plugin (private)
 - 접속/퇴장, 마이크/헤드셋 토글, 방송 시작/종료 효과음과 볼륨 설정.
@@ -14,7 +23,7 @@ CustomVoice native GPU capture (Windows x64)
 - private 업데이트: 설정에서 저장소 Contents 읽기 권한의 GitHub 토큰 등록.
   토큰은 현재 Windows 사용자 DPAPI로 암호화해 BetterDiscord/data/CustomVoice에 저장합니다.
   다른 사용자는 저장소 접근 권한과 자신의 토큰이 필요합니다.
-  새 native가 필요한 업데이트는 전체 ZIP 설치를 안내하고 플러그인을 끄지 않습니다.
+  1.1.1부터는 native를 설정창의 업데이트 버튼으로 별도 갱신합니다.
 - 이번 작업에서는 배포용 빌드만 수행하며 테스트·실측·computer-use는 수행하지 않습니다.
 
 프로세스 루프백 API 참고:

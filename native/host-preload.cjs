@@ -71,13 +71,16 @@ function install({ allowTest = false } = {}) {
     deliver(message);
   });
   contextBridge.exposeInMainWorld('CustomVoiceNative', {
-    protocol: 2, version: '1.1.0', available: Boolean(textures?.importSharedTexture),
+    protocol: 2, version: '1.1.1', available: Boolean(textures?.importSharedTexture),
     async audioStart(source){const info=await ipcRenderer.invoke(prefix+'audio-start',source);audioSessions.add(info.session);return info;},
     audioActivate:id=>ipcRenderer.invoke(prefix+'audio-activate',id),
     audioConsumed:(id,sequence)=>{if(audioSessions.has(id))ipcRenderer.send(prefix+'audio-consumed',id,sequence);},
     audioStop:id=>{audioSessions.delete(id);return ipcRenderer.invoke(prefix+'audio-stop',id);},
     getUpdateSource:()=>ipcRenderer.invoke(prefix+'update-source'),
     setUpdateToken:token=>ipcRenderer.invoke(prefix+'update-token',token),
+    checkNativeUpdate:()=>ipcRenderer.invoke(prefix+'native-update-check'),
+    prepareNativeUpdate:()=>ipcRenderer.invoke(prefix+'native-update-prepare'),
+    nativeUpdateStatus:()=>ipcRenderer.invoke(prefix+'native-update-status'),
     async start(source, fps, quality) {
       if (!textures?.importSharedTexture) throw new Error('GPU texture import is unavailable in this Electron version.');
       const revision = ++startRevision;
@@ -87,7 +90,7 @@ function install({ allowTest = false } = {}) {
         void ipcRenderer.invoke(prefix + 'stop', info.session).catch(() => {});
         throw new Error('Capture startup was superseded.');
       }
-      active.add(info.session); return { ...info, preloadVersion: '1.1.0' };
+      active.add(info.session); return { ...info, preloadVersion: '1.1.1' };
     },
     activate: (id, boundedDelivery = false) => {
       // Opt in so older renderer bundles remain compatible with this preload.
