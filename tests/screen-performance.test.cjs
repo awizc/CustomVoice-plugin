@@ -264,13 +264,16 @@ test('FPS and processing time come from counter deltas, including resets and idl
   ]);
   const first = api.readScreenStats(report(100, 0.5, 1000), undefined, true);
   assert.equal(first.fps, undefined, 'No configured FPS should masquerade as measured FPS');
+  assert.equal(first.intervalMs, undefined);
   const second = api.readScreenStats(report(180, 0.9, 3000), first.sample, true);
   assert.equal(second.fps, 40);
+  assert.equal(second.intervalMs, 2000, 'Cadence rounding uses the actual counter interval');
   assert.ok(Math.abs(second.processingMs - 5) < 0.001);
   assert.equal(second.codec, 'H264');
   assert.equal(second.limitation, 'cpu');
   assert.equal(api.readScreenStats(report(180, 0.9, 5000), second.sample, true).fps, 0);
   assert.equal(api.readScreenStats(report(1, 0.01, 6000), second.sample, true).fps, undefined);
+  assert.equal(api.readScreenStats(report(1, 0.01, 6000), second.sample, true).intervalMs, undefined);
   const received = new Map([['remote', { id: 'remote', type: 'inbound-rtp', kind: 'video', framesDecoded: 60, totalDecodeTime: 0.12, timestamp: 2000 }]]);
   assert.equal(api.readScreenStats(received, { id: 'remote', frames: 0, time: 0, timestamp: 1000 }, false).fps, 60);
   const captureReport = report(420, 2, 5000);

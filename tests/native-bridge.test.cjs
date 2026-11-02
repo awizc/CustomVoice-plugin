@@ -123,7 +123,7 @@ test('old hosts pace fresh and repeated frames evenly with one latest frame and 
   const h = rendererHarness({ clock }), control = await h.start();
   const slow = { encodeFps: 30, captureFps: 144, processingMs: 25 };
   control.updateEncoderStats(slow); control.updateEncoderStats(slow);
-  assert.equal(control.diagnostics.pacingFps, 33);
+  assert.equal(control.diagnostics.pacingFps, 72);
   const closed = [];
   const send = (id, revision) => h.emit('customvoice-native-frame-v2',{revision,frame:{close:()=>closed.push(id)}});
   send(1,1); send(2,2); send(3,3);
@@ -140,7 +140,7 @@ test('native pacing feedback changes effective cadence without changing the requ
   const h = rendererHarness({ nativePacing: true }), control = await h.start();
   const slow = { encodeFps: 30, captureFps: 144, processingMs: 25 };
   control.updateEncoderStats(slow); control.updateEncoderStats(slow);
-  assert.deepEqual(h.paces,[144,33]);
+  assert.deepEqual(h.paces,[144,72]);
   assert.equal(control.track.getSettings().frameRate,144);
   assert.equal(control.diagnostics.nativePacing,true);
   await control.configure('720p',120);
@@ -154,13 +154,14 @@ test('cadence ignores transient drops and high parallel hardware encode latency,
   const slow = { encodeFps:30,captureFps:144,processingMs:25 };
   controller.update(slow); controller.update(healthy);
   for (let i=0;i<6;i++) assert.equal(controller.update(healthy),144);
-  controller.update(slow); assert.equal(controller.update(slow),33);
+  controller.update(slow); assert.equal(controller.update(slow),72);
+  controller.update(slow); assert.equal(controller.update(slow),36,'Ongoing overload continues to back off');
   // Healthy HW pipelines can encode in parallel: cost alone must not prevent recovery.
   for (let i=0;i<25;i++) controller.update({encodeFps:controller.fps,captureFps:controller.fps,processingMs:40,powerEfficientEncoder:true});
   assert.equal(controller.fps,144);
-  const duplicate = { ...slow, sample:{timestamp:1} };
+  const duplicate = { ...slow, sample:{timestamp:1000} };
   controller.update(duplicate); controller.update(duplicate); assert.equal(controller.fps,144);
-  controller.update({...slow,sample:{timestamp:2}}); assert.equal(controller.fps,33);
+  controller.update({...slow,sample:{timestamp:2000}}); assert.equal(controller.fps,72);
 });
 
 test('Alt-Tab source waits cannot collapse cadence, and return-to-game skips stale zero-FPS samples', () => {
@@ -183,10 +184,65 @@ test('zero encoded frames with genuine backpressure back off gradually instead o
   cadence.update(stats,native);assert.equal(cadence.update(stats,native),82.5);
 });
 
+test('a transient 283 ms encoder sample cannot collapse 165 FPS to 3 FPS',()=>{
+  for(const powerEfficientEncoder of [undefined,false,true]){
+    const cadence=rendererHarness().api.createCadenceController(165);
+    cadence.update({encodeFps:100,captureFps:165,processingMs:8,limitation:'cpu',powerEfficientEncoder});
+    cadence.update({encodeFps:21.97,captureFps:20.97,processingMs:283.318,limitation:'cpu',powerEfficientEncoder});
+    assert.ok(cadence.fps>=82.5,`One adjustment dropped to ${cadence.fps} FPS`);
+    assert.ok(cadence.fps<165,'Sustained overload must still reduce offered work');
+  }
+});
+
+test('3.18 FPS recovers with quantized 3-frame samples and missing encoder type',()=>{
+  const cadence=rendererHarness().api.createCadenceController(165);
+  const slow={encodeFps:2.88785,captureFps:165,processingMs:283.318,limitation:'cpu',powerEfficientEncoder:false};
+  for(let i=0;i<20&&cadence.fps>3.2;i++)cadence.update(slow);
+  assert.ok(cadence.fps>3&&cadence.fps<3.2,'Reproduce the logged fractional pace');
+  const rates=[];
+  for(let i=0;i<42;i++){
+    const rate=cadence.fps,intervalMs=1001.2,quantized=Math.floor(rate*intervalMs/1000)*1000/intervalMs;
+    cadence.update({sample:{timestamp:(i+1)*intervalMs},intervalMs,encodeFps:quantized,captureFps:quantized,processingMs:10,limitation:i<12?'cpu':'none'},
+      {sourceAvailable:true,outputFps:rate,outputWorkMs:.3,outputOverrunFps:0,backpressureFps:0,preImportDropFps:0});
+    rates.push(cadence.fps);
+  }
+  assert.ok(rates[3]>5,'Recovery must start within a few samples');
+  assert.equal(cadence.fps,165,'Unknown hardware must not be capped by reciprocal encode latency');
+});
+
+test('rounding tolerance cannot call a zero-output or genuinely overloaded encoder healthy',()=>{
+  const cadence=rendererHarness().api.createCadenceController(165);
+  for(let i=0;i<20;i++)cadence.update({encodeFps:0,captureFps:10},{sourceAvailable:true,backpressureFps:165});
+  assert.equal(cadence.fps,1);
+  for(let i=0;i<20;i++)cadence.update({intervalMs:1000,encodeFps:0,captureFps:0,processingMs:0},{sourceAvailable:true});
+  assert.equal(cadence.fps,1,'Zero frames are never evidence of recovery');
+  for(let i=0;i<20;i++)cadence.update({intervalMs:1000,encodeFps:1,captureFps:1,processingMs:900,powerEfficientEncoder:false},{sourceAvailable:true});
+  assert.equal(cadence.fps,1,'Known software saturation still blocks recovery');
+});
+
+test('fractional low FPS recovers through the native bridge with different polling intervals',async()=>{
+  for(const intervalMs of [1001.2,2001.2]){
+    const clock={time:0},h=rendererHarness({nativePacing:true,clock}),control=await h.start();
+    const slow={encodeFps:0,captureFps:144};
+    for(let i=0;i<12;i++)control.updateEncoderStats(slow);
+    assert.equal(control.diagnostics.pacingFps,2.25);
+    const before=h.paces.length;
+    for(let i=0;i<42;i++){
+      clock.time+=intervalMs;
+      const rate=control.diagnostics.pacingFps,quantized=Math.floor(rate*intervalMs/1000)*1000/intervalMs;
+      control.updateEncoderStats({sample:{timestamp:clock.time},encodeFps:quantized,captureFps:quantized,processingMs:10,limitation:'cpu'});
+    }
+    assert.ok(h.paces.length>before,'Recovered limits must reach the native worker');
+    assert.equal(h.paces.at(-1),144);
+    assert.equal(control.track.getSettings().frameRate,144,'Recovery keeps the requested profile');
+    control.stop();
+  }
+});
+
 test('mode and source recovery immediately restore native pace and state also arrives with frames',async()=>{
   const h=rendererHarness({nativePacing:true}),control=await h.start();
   const slow={encodeFps:30,captureFps:144,processingMs:25};
-  control.updateEncoderStats(slow);control.updateEncoderStats(slow);assert.equal(control.diagnostics.pacingFps,33);
+  control.updateEncoderStats(slow);control.updateEncoderStats(slow);assert.equal(control.diagnostics.pacingFps,72);
   h.emit('customvoice-native-status-v2',{event:'capture-mode',backend:'WGC-D3D11',sourceAvailable:false});
   assert.equal(control.diagnostics.pacingFps,144);assert.equal(h.paces.at(-1),144);
   for(let i=0;i<6;i++)control.updateEncoderStats({encodeFps:0,captureFps:0});
@@ -194,7 +250,7 @@ test('mode and source recovery immediately restore native pace and state also ar
   h.emit('customvoice-native-frame-v2',{sourceAvailable:true,frame:{close(){}}});
   assert.equal(control.diagnostics.sourceAvailable,true);assert.equal(h.paces.at(-1),144);
   control.updateEncoderStats(slow);control.updateEncoderStats(slow);assert.equal(control.diagnostics.pacingFps,144);
-  control.updateEncoderStats(slow);control.updateEncoderStats(slow);assert.equal(control.diagnostics.pacingFps,33);
+  control.updateEncoderStats(slow);control.updateEncoderStats(slow);assert.equal(control.diagnostics.pacingFps,72);
   h.emit('customvoice-native-status-v2',{event:'resized',width:1920,height:1080});
   assert.equal(control.diagnostics.pacingFps,144);
   await new Promise(setImmediate);control.stop();
@@ -215,7 +271,7 @@ test('cadence handles a stalled encoder, low source cadence, and GPU backpressur
   for(let i=0;i<4;i++) controller.update({encodeFps:30,captureFps:30,processingMs:1});
   assert.equal(controller.fps,144,'A quiet source is not encoder overload');
   controller.update({encodeFps:30,captureFps:30},{backpressureFps:90});
-  assert.equal(controller.update({encodeFps:30,captureFps:30},{backpressureFps:90}),33);
+  assert.equal(controller.update({encodeFps:30,captureFps:30},{backpressureFps:90}),72);
   for(let i=0;i<30;i++) controller.update({encodeFps:0,captureFps:10});
   assert.equal(controller.fps,1);
   assert.equal(controller.update({}),1);

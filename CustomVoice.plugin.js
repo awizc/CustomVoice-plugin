@@ -1,7 +1,7 @@
 /**
  * @name CustomVoice
  * @author CustomVoice contributors
- * @version 1.1.19
+ * @version 1.1.20
  * @nativeVersion 1.1.14
  * @description Independent LiveKit voice channels inside Discord.
  * @source https://github.com/awizc/CustomVoice-plugin
@@ -32234,8 +32234,10 @@ function createNativeCaptureModule() {
       recover() { rate = target; overloaded = healthy = 0; warmup = 2; },
       update(stats, native = {}) {
         const timestamp = stats?.sample?.timestamp;
+        let intervalMs = stats?.intervalMs;
         if (Number.isFinite(timestamp)) {
           if (previousTime !== undefined && timestamp <= previousTime) return rate;
+          if (!(Number.isFinite(intervalMs) && intervalMs > 0) && previousTime !== undefined) intervalMs = timestamp - previousTime;
           previousTime = timestamp;
         }
         const sent = stats?.encodeFps, cost = stats?.processingMs;
@@ -32244,22 +32246,30 @@ function createNativeCaptureModule() {
         if (native.sourceAvailable === false) { rate = target; overloaded = healthy = 0; warmup = 2; return rate; }
         if (!Number.isFinite(sent) || sent < 0) return rate;
         if (warmup > 0) { warmup--; return rate; }
+        // Counter deltas contain whole frames. Allow one frame per sampling
+        // interval so a fractional low pace is not mistaken for lost throughput.
+        const rounding = 1000 / (Number.isFinite(intervalMs) && intervalMs > 0 ? intervalMs : 1000);
         const offered = Math.min(rate, Number.isFinite(stats.captureFps) ? Math.max(stats.captureFps, rate * 0.5) : rate);
         const busy = native.backpressureFps > rate * 0.1 || native.preImportDropFps > rate * 0.1;
         const stalled = sent === 0 && stats.captureFps > 1;
-        const slowEncoder = sent < offered * 0.82 && (stalled || busy || stats.limitation === 'cpu' || Number.isFinite(cost) && cost > 1000 / offered);
+        const slowEncoder = (sent === 0 || sent + rounding < offered * 0.82) && (stalled || busy || stats.limitation === 'cpu' || Number.isFinite(cost) && cost > 1000 / offered);
         const slowCapture = native.outputOverrunFps > rate * 0.15 && native.outputFps < rate * 0.85 && native.outputWorkMs > 1000 / rate;
         const slow = slowEncoder || slowCapture;
         overloaded = slow ? overloaded + 1 : 0;
-        const hardware = stats.powerEfficientEncoder === true;
+        // An absent WebRTC hardware flag is unknown, not proof of a serial CPU
+        // encoder. Parallel encode latency cannot define a throughput ceiling.
+        const software = stats.powerEfficientEncoder === false;
         const captureReady = !Number.isFinite(native.outputWorkMs) || native.outputWorkMs < 750 / rate;
-        healthy = !slow && !busy && captureReady && sent >= rate * 0.95 && (hardware || Number.isFinite(cost) && cost < 750 / rate) ? healthy + 1 : 0;
+        const encoderReady = !software || !Number.isFinite(cost) || cost < 750 / rate;
+        healthy = sent > 0 && !slow && !busy && captureReady && sent + rounding >= rate * 0.95 && encoderReady ? healthy + 1 : 0;
         if (overloaded >= 2) {
-          const encoderCapacity = !slowEncoder ? rate : sent === 0 ? rate * 0.5 : Math.min(sent * 1.1, !hardware && Number.isFinite(cost) && cost > 0 ? 900 / cost : rate);
+          const encoderCapacity = !slowEncoder ? rate : sent === 0 ? rate * 0.5 : Math.min(sent * 1.1, software && Number.isFinite(cost) && cost > 0 ? 900 / cost : rate);
           // Unlike parallel hardware encoding, this native worker is serial:
           // reserve some time when conversion/submission itself is the bottleneck.
           const capacity = Math.min(encoderCapacity, slowCapture ? 900 / native.outputWorkMs : rate);
-          rate = Math.max(1, Math.min(rate * 0.85, capacity));
+          // A brief stall can skew one encode-time sample by hundreds of ms.
+          // Bound each adjustment; ongoing overload still backs off every pair.
+          rate = Math.max(1, rate * 0.5, Math.min(rate * 0.85, capacity));
           overloaded = healthy = 0;
         } else if (healthy >= 3 && rate < target) {
           rate = Math.min(target, rate + Math.max(2, rate * 0.2));
@@ -56915,7 +56925,7 @@ function createServerSetup(manager, compat) {
 }
 
 // package.json
-var version3 = "1.1.19";
+var version3 = "1.1.20";
 
 // src/components/settings.ts
 function createSettingsPanel(manager, compat) {
@@ -58108,10 +58118,11 @@ function readScreenStats(report, previous, local) {
     source: source ? { id: source.id, timestamp: source.timestamp, frames: source.frames } : void 0
   };
   let fps = Number.isFinite(selected.framesPerSecond) ? selected.framesPerSecond : void 0;
-  let processingMs;
+  let processingMs, intervalMs;
   if (previous?.id === sample.id && sample.timestamp > previous.timestamp && sample.frames >= previous.frames) {
     const frames = sample.frames - previous.frames;
-    fps = frames * 1e3 / (sample.timestamp - previous.timestamp);
+    intervalMs = sample.timestamp - previous.timestamp;
+    fps = frames * 1e3 / intervalMs;
     if (frames > 0 && Number.isFinite(sample.time) && Number.isFinite(previous.time) && sample.time >= previous.time)
       processingMs = (sample.time - previous.time) * 1e3 / frames;
   }
@@ -58122,7 +58133,7 @@ function readScreenStats(report, previous, local) {
   const encodeFps = fps;
   if (local && previous?.id === sample.id && sample.timestamp > previous.timestamp && Number.isFinite(sample.sentFrames) && Number.isFinite(previous.sentFrames) && sample.sentFrames >= previous.sentFrames)
     fps = (sample.sentFrames - previous.sentFrames) * 1e3 / (sample.timestamp - previous.timestamp);
-  return { sample, fps, encodeFps, captureFps, processingMs, limitation: selected.qualityLimitationReason, encoder: local ? selected.encoderImplementation : void 0, powerEfficientEncoder: local ? selected.powerEfficientEncoder : void 0, codec: report.get?.(selected.codecId)?.mimeType?.split("/")[1], codecParameters: report.get?.(selected.codecId)?.sdpFmtpLine };
+  return { sample, intervalMs, fps, encodeFps, captureFps, processingMs, limitation: selected.qualityLimitationReason, encoder: local ? selected.encoderImplementation : void 0, powerEfficientEncoder: local ? selected.powerEfficientEncoder : void 0, codec: report.get?.(selected.codecId)?.mimeType?.split("/")[1], codecParameters: report.get?.(selected.codecId)?.sdpFmtpLine };
 }
 var screenStatsWatchers = /* @__PURE__ */ new WeakMap();
 function watchScreenStats(track, local, doc, update, interval = 2000) {
