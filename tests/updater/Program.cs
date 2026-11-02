@@ -87,6 +87,36 @@ internal static class Program
             Reject(() => NativeUpdate.PackagePluginNewer(payload, plugins, "1.1.18"));
             File.WriteAllText(source, Plugin("1.1.17").Replace("CustomVoice", "Other"));
             Reject(() => NativeUpdate.PackagePluginNewer(payload, plugins, "1.1.17"));
+            string native = Path.Combine(plugins, "CustomVoice.native"); Directory.CreateDirectory(native);
+            foreach (string name in new[] { "CustomVoice.Capture.exe", "CustomVoice.Publisher.exe", "CustomVoice.Capture.dll", "CustomVoice.Capture.runtimeconfig.json", "coreclr.dll", "hostfxr.dll", "host-main.cjs", "host-preload.cjs", "audio-main.cjs", "github-main.cjs", "window-sources-main.cjs" })
+                File.WriteAllText(Path.Combine(native, name), "fixture:" + name);
+            Directory.CreateDirectory(Path.Combine(native, "game-hook"));
+            foreach (string name in new[] { "graphics-hook32.dll", "graphics-hook64.dll", "inject-helper32.exe", "inject-helper64.exe", "get-graphics-offsets32.exe", "get-graphics-offsets64.exe", "COPYING.txt", "NOTICE.txt", "OBS-Studio-32.0.4-Sources.tar.gz" })
+                File.WriteAllText(Path.Combine(native, "game-hook", name), "fixture:" + name);
+            string stamp = Path.Combine(native, "native-version.json"), manifest = Path.Combine(native, "manifest.json");
+            File.WriteAllText(stamp, JsonSerializer.Serialize(new { version = "1.1.16" }));
+            File.WriteAllText(manifest, JsonSerializer.Serialize(Directory.GetFiles(native, "*", SearchOption.AllDirectories).Select(file => new { name = Path.GetRelativePath(native, file).Replace('\\', '/'), sha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(file))) })));
+            var healthy = NativeUpdate.InspectInstallation(plugins);
+            Check(healthy.valid && healthy.version == "1.1.16", "Healthy installation rejected");
+            Check(!NativeUpdate.UpdateAvailable(healthy, "1.1.16"), "Healthy current install needs no update");
+            Check(NativeUpdate.UpdateAvailable(healthy, "1.1.17"), "Newer release must be offered");
+            Check(NativeUpdate.ReconcileStatus(new("failed", "1.1.16", message: "old locked file"), healthy).state == "installed", "Stale failure was not cleared after verified installation");
+            Check(NativeUpdate.ReconcileStatus(new("failed", "1.1.17"), healthy).state == "failed", "A failed newer version was hidden");
+            Check(NativeUpdate.ReconcileStatus(new("waiting", "1.1.16"), healthy).state == "waiting", "Live worker state changed");
+            File.WriteAllText(Path.Combine(native, "host-preload.cjs"), "corrupt");
+            var corrupt = NativeUpdate.InspectInstallation(plugins);
+            Check(!corrupt.valid && corrupt.version == "1.1.16", "Corrupt files were accepted by version stamp alone");
+            Check(NativeUpdate.UpdateAvailable(corrupt, "1.1.16"), "Same-version repair was not offered");
+            Check(!NativeUpdate.UpdateAvailable(corrupt, "1.1.15"), "Repair must not downgrade");
+            Check(NativeUpdate.ReconcileStatus(new("installed", "1.1.16"), corrupt).state == "failed", "Invalid installation showed success");
+            Check(NativeUpdate.ReconcileStatus(new("failed", "1.1.16"), corrupt).state == "failed", "Corrupt install cleared failure");
+            File.WriteAllText(manifest, "[{\"name\":null,\"sha256\":null}]");
+            Check(!NativeUpdate.InspectInstallation(plugins).valid, "Malformed manifest did not require repair");
+            File.WriteAllText(stamp, "{\"version\":\"broken\"}");
+            Check(NativeUpdate.UpdateAvailable(NativeUpdate.InspectInstallation(plugins), "1.1.16"), "Malformed stamp did not offer repair");
+            File.Delete(stamp);
+            Check(NativeUpdate.UpdateAvailable(NativeUpdate.InspectInstallation(plugins), "1.1.16"), "Missing stamp did not offer repair");
+            Console.WriteLine("PASS: installed file hashes, stale failure reconciliation, same-version repair, no downgrade");
             Console.WriteLine("PASS: release metadata validation and bootstrap upgrades without plugin downgrades");
         }
         finally { Directory.Delete(root, true); }

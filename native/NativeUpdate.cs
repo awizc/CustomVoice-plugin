@@ -6,7 +6,7 @@ using System.Text.RegularExpressions;
 
 internal static class NativeUpdate
 {
-    internal const string CurrentVersion = "1.1.15";
+    internal const string CurrentVersion = "1.1.16";
     static string Plugins => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "BetterDiscord", "plugins");
     static string Root => Path.Combine(Path.GetDirectoryName(Plugins)!, "data", "CustomVoice", "native-updates");
     static string StateFile => Path.Combine(Root, "status.json");
@@ -14,13 +14,31 @@ internal static class NativeUpdate
     internal sealed record Metadata(int schema, string nativeVersion, string packageVersion, string file, string sha256);
     sealed record Release(Metadata Meta, Uri Url);
     static Version VersionOf(string? value) => value != null && Regex.IsMatch(value, @"^\d+\.\d+\.\d+$") && Version.TryParse(value, out var parsed) ? parsed : throw new InvalidDataException("업데이트 버전 정보가 올바르지 않습니다.");
-    static string InstalledVersion()
+    internal sealed record Installation(string version, bool valid, string? message = null);
+    internal static Installation InspectInstallation(string pluginsDirectory)
     {
-        string file = Path.Combine(Plugins, "CustomVoice.native", "native-version.json");
-        if (!File.Exists(file)) return "0.0.0";
-        using var document = JsonDocument.Parse(File.ReadAllText(file));
-        string version = document.RootElement.GetProperty("version").GetString()!;
-        _ = VersionOf(version); return version;
+        string version = "0.0.0";
+        try
+        {
+            string directory = Path.Combine(pluginsDirectory, "CustomVoice.native");
+            using var document = JsonDocument.Parse(File.ReadAllText(Path.Combine(directory, "native-version.json")));
+            string stamp = document.RootElement.GetProperty("version").GetString()!;
+            _ = VersionOf(stamp); version = stamp;
+            Validate(directory, version);
+            return new(version, true);
+        }
+        catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException or JsonException or InvalidOperationException or KeyNotFoundException or FormatException or ArgumentException)
+        { return new(version, false, "native 설치 파일이 누락되었거나 서로 맞지 않습니다. 구성요소 업데이트로 복구할 수 있습니다."); }
+    }
+    internal static bool UpdateAvailable(Installation installed, string latest) =>
+        VersionOf(latest) > VersionOf(installed.version) || latest == installed.version && !installed.valid;
+    internal static State ReconcileStatus(State state, Installation installed)
+    {
+        if (state.state == "failed" && state.version != null && installed.valid && VersionOf(installed.version) >= VersionOf(state.version))
+            return new("installed", installed.version, message: "설치 파일 검증 완료. 이전 업데이트 실패 기록은 현재 설치 상태에 해당하지 않습니다.");
+        if (state.state is "installed" or "current")
+            return installed.valid ? state with { version = installed.version } : new("failed", installed.version, message: installed.message);
+        return state;
     }
     static bool Alive(State state)
     {
@@ -29,7 +47,7 @@ internal static class NativeUpdate
         catch (InvalidOperationException) { return false; }
         catch (System.ComponentModel.Win32Exception) { return false; }
     }
-    internal static State Status()
+    internal static State Status(Installation? installed = null)
     {
         if (!File.Exists(StateFile)) return new("idle");
         try
@@ -39,7 +57,8 @@ internal static class NativeUpdate
             State state = JsonSerializer.Deserialize<State>(input) ?? throw new JsonException("상태 정보가 비어 있습니다.");
             if (state.state is not ("idle" or "downloading" or "waiting" or "applying" or "failed" or "installed" or "current") || state.version != null && (!Regex.IsMatch(state.version, @"^\d+\.\d+\.\d+$") || !Version.TryParse(state.version, out _))) throw new JsonException("알 수 없는 업데이트 상태입니다.");
             if (state.state is "downloading" or "waiting" or "applying" && !Alive(state))
-                return state with { state = "failed", message = "이전 업데이트가 중단되었습니다. 새 버전 확인 후 다시 시도해 주세요." };
+                state = state with { state = "failed", message = "이전 업데이트가 중단되었습니다. 새 버전 확인 후 다시 시도해 주세요." };
+            if (state.state is "failed" or "installed" or "current") return ReconcileStatus(state, installed ?? InspectInstallation(Plugins));
             return state;
         }
         catch (Exception error) when (error is JsonException or IOException or UnauthorizedAccessException)
@@ -81,9 +100,9 @@ internal static class NativeUpdate
     {
         using var http = GithubUpdate.Client(); using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(40));
         var release = await Latest(http, cancellation.Token);
-        string installed = InstalledVersion();
-        Program.Send(new { installedVersion = installed, latestVersion = release.Meta.nativeVersion,
-            available = VersionOf(release.Meta.nativeVersion) > VersionOf(installed), pending = Status(),
+        var installed = InspectInstallation(Plugins);
+        Program.Send(new { installedVersion = installed.version, helperVersion = CurrentVersion, installationValid = installed.valid, repairRequired = !installed.valid, latestVersion = release.Meta.nativeVersion,
+            available = UpdateAvailable(installed, release.Meta.nativeVersion), pending = Status(installed), message = installed.message,
             releaseUrl = $"https://github.com/{GithubUpdate.Repository}/releases/tag/v{release.Meta.packageVersion}" });
     }
     static string Within(string directory, string relative)
@@ -119,6 +138,7 @@ internal static class NativeUpdate
         }
         foreach (string name in new[] { "CustomVoice.Capture.exe", "CustomVoice.Capture.dll", "CustomVoice.Capture.runtimeconfig.json", "coreclr.dll", "hostfxr.dll", "host-main.cjs", "host-preload.cjs", "audio-main.cjs", "github-main.cjs", "window-sources-main.cjs", "native-version.json" })
             if (!names.Contains(name)) throw new InvalidDataException("native 배포 파일이 누락되었습니다.");
+        if (VersionOf(version) >= new Version(1, 1, 15) && !names.Contains("CustomVoice.Publisher.exe")) throw new InvalidDataException("native 송출 구성요소가 누락되었습니다.");
         foreach (string name in new[] { "graphics-hook32.dll", "graphics-hook64.dll", "inject-helper32.exe", "inject-helper64.exe", "get-graphics-offsets32.exe", "get-graphics-offsets64.exe", "COPYING.txt", "NOTICE.txt", "OBS-Studio-32.0.4-Sources.tar.gz" })
             if (!names.Contains("game-hook/" + name)) throw new InvalidDataException("게임 캡처 배포 파일이 누락되었습니다.");
         using var stamp = JsonDocument.Parse(File.ReadAllText(Path.Combine(payload, "native-version.json")));
@@ -142,7 +162,9 @@ internal static class NativeUpdate
                 using var http = GithubUpdate.Client(); using var cancellation = new CancellationTokenSource(TimeSpan.FromMinutes(5));
                 Save(Owned("downloading", null));
                 var release = await Latest(http, cancellation.Token); version = release.Meta.nativeVersion;
-                if (VersionOf(version) <= VersionOf(InstalledVersion())) { var current = new State("current", InstalledVersion()); Save(current); Program.Send(current); return; }
+                var installed = InspectInstallation(Plugins);
+                if (VersionOf(version) < VersionOf(installed.version) && !installed.valid) throw new IOException("설치된 버전보다 낮은 배포본으로 복구할 수 없습니다. 해당 버전 이상의 전체 ZIP을 설치해 주세요.");
+                if (VersionOf(version) <= VersionOf(installed.version) && installed.valid) { var current = new State("current", installed.version); Save(current); Program.Send(current); return; }
                 Save(Owned("downloading", version));
                 string job = Path.Combine(Root, Guid.NewGuid().ToString("N")); Directory.CreateDirectory(job);
                 string zip = Path.Combine(job, "package.zip"), unpacked = Path.Combine(job, "payload");
@@ -251,19 +273,24 @@ internal static class NativeUpdate
                 int retries = 0;
                 while (true)
                 {
-                    if (DateTime.UtcNow > deadline) throw new IOException("24시간 내에 Discord가 종료되지 않아 업데이트 예약을 취소했습니다. 다시 업데이트해 주세요.");
-                    if (NativeInstaller.DiscordRunning()) { retries = 0; await Task.Delay(1500); continue; }
-                    await Task.Delay(1500);
+                    if (DateTime.UtcNow > deadline) throw new IOException("24시간 동안 적용 조건을 충족하지 못해 업데이트 예약을 취소했습니다. 대기 사유를 확인한 뒤 다시 업데이트해 주세요.");
+                    if (NativeInstaller.DiscordRunning()) { retries = 0; await Task.Delay(500); continue; }
+                    await Task.Delay(250);
                     if (NativeInstaller.DiscordRunning()) continue;
-                    if (VersionOf(InstalledVersion()) >= VersionOf(version)) { Save(new("installed", InstalledVersion(), message: "native가 최신 버전입니다.")); return 0; }
+                    var installed = InspectInstallation(Plugins);
+                    if (VersionOf(installed.version) > VersionOf(version) && !installed.valid) throw new IOException("더 새로운 native 설치를 이전 배포본으로 덮어쓸 수 없습니다.");
+                    if (VersionOf(installed.version) >= VersionOf(version) && installed.valid) { Save(new("installed", installed.version, message: "native 설치 파일 검증을 완료했습니다.")); return 0; }
                     Validate(payload, version); Save(Owned("applying", version));
                     try
                     {
                         bool includePlugin = PackagePluginNewer(payload, Plugins, meta.packageVersion);
                         string result = NativeInstaller.Install(payload, Plugins, nativeOnly: !includePlugin, requireDiscordExit: true);
+                        var verified = InspectInstallation(Plugins);
+                        if (!verified.valid || verified.version != version) throw new IOException("native 설치 검증에 실패했습니다. 다시 적용합니다.");
                         Save(new("installed", version, message: result)); return 0;
                     }
-                    catch (IOException) when (NativeInstaller.DiscordRunning() || ++retries < 20) { Save(Owned("waiting", version)); }
+                    catch (NativeInstaller.FilesBusyException error) { retries = 0; Save(Owned("waiting", version, error.Message)); await Task.Delay(5000); }
+                    catch (IOException) when (NativeInstaller.DiscordRunning() || ++retries < 20) { Save(Owned("waiting", version)); await Task.Delay(1500); }
                 }
             }
         }

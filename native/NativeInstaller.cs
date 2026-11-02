@@ -9,8 +9,24 @@ using System.Text.RegularExpressions;
 // SDK, network download, elevation, or independently installed runtime is needed.
 internal static class NativeInstaller
 {
+    internal sealed class FilesBusyException(string file, IOException inner)
+        : IOException($"{Path.GetFileName(file)} 파일을 사용 중입니다. 해당 게임·캡처 프로그램을 종료하면 업데이트를 계속합니다.", inner);
+    internal static bool SharingViolation(IOException error) => (error.HResult & 0xffff) is 32 or 33;
     static readonly Regex Hook = new("\\n// <CustomVoiceNativeHost>[\\s\\S]*?// </CustomVoiceNativeHost>\\n?", RegexOptions.CultureInvariant);
     static string Hash(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+
+    static bool SameFileContents(string source, string target)
+    {
+        try
+        {
+            if (!File.Exists(target) || new FileInfo(source).Length != new FileInfo(target).Length) return false;
+            using var input = File.OpenRead(source);
+            using var installed = new FileStream(target, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            return SHA256.HashData(input).AsSpan().SequenceEqual(SHA256.HashData(installed));
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+    }
 
     internal static byte[] PatchArchive(byte[] bytes, string nativeDirectory, bool remove = false)
     {
@@ -111,13 +127,19 @@ internal static class NativeInstaller
             string targetPlugin = Path.Combine(pluginsDirectory, "CustomVoice.plugin.js");
             if (!nativeOnly && File.Exists(plugin) && !plugin.Equals(targetPlugin, StringComparison.OrdinalIgnoreCase)) copies.Add((plugin, targetPlugin));
         }
+        // A game may retain the hook DLL after Discord exits. Identical files
+        // need no write access and must not block an unrelated native update.
+        copies.RemoveAll(copy => SameFileContents(copy.Source, copy.Target));
+        // Commit version metadata after all executable and bridge files.
+        copies = copies.OrderBy(copy => Path.GetFileName(copy.Target) switch { "native-version.json" => 2, "manifest.json" => 1, _ => 0 }).ToList();
         bool archiveChanged = !original.AsSpan().SequenceEqual(updated);
         if (!archiveChanged && copies.Count == 0) return "이미 설치되어 있습니다.";
         // A short-lived status/download helper can outlive Discord. Detect its
         // file locks before creating backups or changing any installed files.
-        if (nativeOnly || requireDiscordExit)
-            foreach (var (_, target) in copies)
-                if (File.Exists(target)) { using var available = new FileStream(target, FileMode.Open, FileAccess.ReadWrite, FileShare.None); }
+        foreach (var (_, target) in copies)
+            if (File.Exists(target))
+                try { using var available = new FileStream(target, FileMode.Open, FileAccess.ReadWrite, FileShare.None); }
+                catch (IOException error) when (SharingViolation(error)) { throw new FilesBusyException(target, error); }
         string backup = Path.Combine(dataDirectory, "CustomVoice-install-backups", DateTime.Now.ToString("yyyyMMdd-HHmmss") + "-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(backup);
         File.WriteAllBytes(Path.Combine(backup, "betterdiscord.asar"), original);

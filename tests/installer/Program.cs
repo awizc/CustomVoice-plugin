@@ -84,6 +84,29 @@ try
     Check(File.ReadAllBytes(archive).SequenceEqual(NativeInstaller.PatchArchive(original, Path.Combine(plugins, "CustomVoice.native"))), "Wrong install destination");
     Check(Directory.GetFiles(Path.Combine(data, "CustomVoice-install-backups"), "betterdiscord.asar", SearchOption.AllDirectories).Any(file => File.ReadAllBytes(file).SequenceEqual(original)), "Original archive backup is missing");
     Console.WriteLine("PASS: package install, hook destination, backups, settings preservation");
+    string installedNative = Path.Combine(plugins, "CustomVoice.native"), hook = Path.Combine(installedNative, "game-hook", "graphics-hook64.dll");
+    string sourceHook = Path.Combine(payload, "game-hook", "graphics-hook64.dll");
+    File.SetLastWriteTimeUtc(hook, new DateTime(2020, 1, 1));
+    DateTime hookWrite = File.GetLastWriteTimeUtc(hook);
+    File.WriteAllText(Path.Combine(payload, "host-main.cjs"), "updated bridge"); Manifest(payload);
+    using (var game = new FileStream(hook, FileMode.Open, FileAccess.Read, FileShare.Read))
+        NativeInstaller.Install(payload, plugins);
+    Check(File.GetLastWriteTimeUtc(hook) == hookWrite, "Unchanged loaded hook was rewritten");
+    Check(File.ReadAllText(Path.Combine(installedNative, "host-main.cjs")) == "updated bridge", "Unchanged loaded hook blocked bridge update");
+    File.WriteAllText(sourceHook, "changed hook");
+    File.WriteAllText(Path.Combine(payload, "host-main.cjs"), "next bridge");
+    File.WriteAllText(Path.Combine(payload, "native-version.json"), "next version"); Manifest(payload);
+    using (var game = new FileStream(hook, FileMode.Open, FileAccess.Read, FileShare.Read))
+    {
+        try { NativeInstaller.Install(payload, plugins); throw new Exception("Overwrote a changed loaded hook"); }
+        catch (NativeInstaller.FilesBusyException error) { Check(error.Message.Contains("graphics-hook64.dll"), "Waiting reason must identify the locked file"); }
+        Check(File.ReadAllText(Path.Combine(installedNative, "host-main.cjs")) == "updated bridge", "Blocked update partially changed bridge");
+        Check(File.ReadAllText(Path.Combine(installedNative, "native-version.json")) != "next version", "Blocked update advanced version");
+    }
+    NativeInstaller.Install(payload, plugins);
+    Check(File.ReadAllText(hook) == "changed hook", "Released hook update did not resume");
+    Check(File.ReadAllText(Path.Combine(installedNative, "native-version.json")) == "next version", "Completed update did not advance version");
+    Console.WriteLine("PASS: unchanged loaded hook skipped; changed locked hook waits without partial writes and resumes");
     byte[] before = File.ReadAllBytes(archive);
     string executable = Path.Combine(plugins, "CustomVoice.native", "CustomVoice.Capture.exe");
     string previousExe = File.ReadAllText(executable);

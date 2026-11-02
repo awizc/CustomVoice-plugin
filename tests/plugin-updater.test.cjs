@@ -113,3 +113,49 @@ test('failed disk write restores the previous plugin',()=>{
   const h=harness({require:name=>name==='fs'?fake:require(name)});h.api.Plugins={folder:'C:/test/plugins'};
   assert.throws(()=>h.instance.diskFiles().replace(source(),text),/disk write/);assert.equal(text,source('1.1.12'));h.instance.stop();
 });
+
+test('native waiting notification reports the actual locked-file reason',async()=>{
+  const message='graphics-hook64.dll 파일을 사용 중입니다. 해당 게임을 종료하면 계속합니다.';
+  const h=harness({bridge:{checkNativeUpdate:async()=>({available:true,pending:{state:'waiting',version:'1.1.16',message}}),prepareNativeUpdate:()=>assert.fail('duplicate')}});
+  await h.instance.nativeUpdater.check();await h.instance.nativeUpdater.check();
+  assert.equal(h.toasts.length,1);assert.ok(h.toasts[0].includes(message));h.instance.stop();
+});
+
+function panelHarness(info,loaded='1.1.15'){
+  let result=info,prepares=0;
+  const bridge={version:loaded,checkNativeUpdate:async()=>result,prepareNativeUpdate:async()=>{prepares++;return {state:'waiting',version:result.latestVersion,message:'테스트 적용 대기'};}};
+  const h=harness({bridge});
+  h.context.document={createElement:()=>({children:[],listeners:{},setAttribute(){},append(...nodes){this.children.push(...nodes);},addEventListener(name,fn){this.listeners[name]=fn;}})};
+  const panel=h.context.createNativeUpdatePanel();
+  const [,,version,status,check,install]=panel.element.children;
+  return {...h,panel,version,status,check,install,prepares:()=>prepares,setResult:value=>{result=value;},close(){panel.dispose();h.instance.stop();}};
+}
+
+test('native panel distinguishes loaded and verified disk versions after update',async()=>{
+  const h=panelHarness({installedVersion:'1.1.16',latestVersion:'1.1.16',available:false,installationValid:true,pending:{state:'installed',version:'1.1.16'}});
+  await new Promise(setImmediate);
+  assert.match(h.version.textContent,/실행 중: 1\.1\.15/);assert.match(h.version.textContent,/설치된 native: 1\.1\.16/);
+  assert.match(h.version.textContent,/완전 재시작 필요/);assert.match(h.status.textContent,/완전히 종료/);assert.equal(h.install.disabled,true);h.close();
+});
+
+test('native panel offers same-version repair and respects a real waiting reason',async()=>{
+  const h=panelHarness({installedVersion:'1.1.16',latestVersion:'1.1.16',available:true,repairRequired:true,installationValid:false,pending:{state:'failed',version:'1.1.16',message:'설치 파일 손상'}});
+  await new Promise(setImmediate);
+  assert.match(h.status.textContent,/설치 파일 손상/);assert.equal(h.install.textContent,'구성요소 복구');assert.equal(h.install.disabled,false);
+  await h.install.listeners.click();assert.equal(h.prepares(),1);assert.match(h.status.textContent,/테스트 적용 대기/);assert.equal(h.install.disabled,true);h.close();
+});
+
+test('native panel does not promote disk version from an old completion status',async()=>{
+  const h=panelHarness({installedVersion:'1.1.15',latestVersion:'1.1.16',available:true,pending:{state:'installed',version:'1.1.16'}});
+  await new Promise(setImmediate);
+  assert.match(h.version.textContent,/설치된 native: 1\.1\.15/);assert.equal(h.install.disabled,false);h.close();
+});
+
+test('published plugin UI version and native requirement match release metadata',()=>{
+  const plugin=bundle.match(/@version\s+(\d+\.\d+\.\d+)/)[1],native=bundle.match(/@nativeVersion\s+(\d+\.\d+\.\d+)/)[1];
+  assert.equal(bundle.match(/^var version3 = "([^"]+)";/m)[1],plugin);
+  assert.equal(updater.match(/const required='([^']+)'/)[1],native);
+  assert.equal(bundle.match(/const required='([^']+)'/)[1],native);
+  assert.ok(bundle.includes('pluginVersion: version3, nativeVersion: globalThis.CustomVoiceNative?.version'));
+  for(const [file,pattern] of [['host-main.cjs',/hostVersion: '([^']+)'/],['host-preload.cjs',/protocol: 2, version: '([^']+)'/],['NativeUpdate.cs',/CurrentVersion = "([^"]+)"/]])assert.equal(fs.readFileSync(path.join(__dirname,'../native',file),'utf8').match(pattern)[1],native);
+});

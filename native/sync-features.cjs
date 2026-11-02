@@ -6,7 +6,15 @@ const code=['process-audio.js','voice-extras.js','broadcast-viewers.js','screen-
 const block='// <CustomVoiceFeatures>\n'+code+'\n// </CustomVoiceFeatures>\n';
 if(bundle.includes('// <CustomVoiceFeatures>'))bundle=bundle.replace(/\/\/ <CustomVoiceFeatures>[\s\S]*?\/\/ <\/CustomVoiceFeatures>\r?\n/,()=>block);
 else bundle=bundle.replace('// src/services/session.ts',()=>block+'\n// src/services/session.ts');
-const updater=fs.readFileSync(path.join(__dirname,'plugin-updater.js'),'utf8');
+const pluginVersion=bundle.match(/@version\s+(\d+\.\d+\.\d+)/)?.[1];
+const nativeVersion=bundle.match(/@nativeVersion\s+(\d+\.\d+\.\d+)/)?.[1];
+if(!pluginVersion||!nativeVersion||!/^var version3 = "[^"]+";/m.test(bundle))throw Error('Plugin version metadata is missing');
+bundle=bundle.replace(/^var version3 = "[^"]+";/m,()=>`var version3 = "${pluginVersion}";`);
+const updaterFile=path.join(__dirname,'plugin-updater.js');
+const updaterSource=fs.readFileSync(updaterFile,'utf8');
+if(!/const required='[^']+';/.test(updaterSource))throw Error('Native requirement metadata is missing');
+const updater=updaterSource.replace(/const required='[^']+';/,()=>`const required='${nativeVersion}';`);
+if(updater!==updaterSource)fs.writeFileSync(updaterFile,updater);
 const updaterStart=bundle.indexOf('var PluginUpdater = class {'),updaterEnd=bundle.indexOf('// src/index.ts',updaterStart);
 if(updaterStart<0||updaterEnd<0)throw Error('Updater insertion point is missing');
 bundle=bundle.slice(0,updaterStart)+updater+'\n\n'+bundle.slice(updaterEnd);

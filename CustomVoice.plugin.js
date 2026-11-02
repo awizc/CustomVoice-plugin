@@ -1,8 +1,8 @@
 /**
  * @name CustomVoice
  * @author CustomVoice contributors
- * @version 1.1.22
- * @nativeVersion 1.1.15
+ * @version 1.1.23
+ * @nativeVersion 1.1.16
  * @description Independent LiveKit voice channels inside Discord.
  * @source https://github.com/awizc/CustomVoice-plugin
  * @updateUrl https://raw.githubusercontent.com/awizc/CustomVoice-plugin/main/CustomVoice.plugin.js
@@ -57218,7 +57218,7 @@ function createServerSetup(manager, compat) {
 }
 
 // package.json
-var version3 = "1.1.21";
+var version3 = "1.1.23";
 
 // src/components/settings.ts
 function createSettingsPanel(manager, compat) {
@@ -59903,9 +59903,9 @@ var NativeAutoUpdater = class {
       let pending=info.pending;
       if(!['downloading','waiting','applying'].includes(pending?.state)&&info.available)pending=await prepareNativeUpdateWithStatus(bridge,info.latestVersion,current);
       if(!current())return;this.failures=0;
-      if(pending?.state==='waiting'&&this.announcedVersion!==pending.version){
-        this.announcedVersion=pending.version;
-        this.api.UI?.showToast?.(`native ${pending.version} 자동 다운로드 완료. Discord를 완전히 종료하면 업데이트를 적용합니다.`,{type:'info'});
+      if(pending?.state==='waiting'&&this.announcedState!==`${pending.version}:${pending.message??''}`){
+        this.announcedState=`${pending.version}:${pending.message??''}`;
+        this.api.UI?.showToast?.(`native ${pending.version}: ${pending.message||'다운로드 완료. Discord를 완전히 종료하면 업데이트를 적용합니다.'}`,{type:'info'});
       }
       if(pending?.state==='failed')throw Error(pending.message||'native 자동 업데이트 실패');
     }catch(error){
@@ -59953,36 +59953,34 @@ function createNativeUpdatePanel() {
   const bridge=()=>{const value=globalThis.CustomVoiceNative;if(!value?.checkNativeUpdate||!value?.prepareNativeUpdate)throw Error('native 업데이트 버튼을 처음 사용하려면 1.1.1 이상의 전체 ZIP 설치와 Discord 완전 재시작이 필요합니다.');return value;};
   function paint(){
     if(disposed)return;
-    const loaded=globalThis.CustomVoiceNative?.version,installed=info?.installedVersion??loaded;
-    version.textContent=`설치된 native: ${installed??'연결 없음'}${info?.latestVersion?' / 배포된 native: '+info.latestVersion:''}${loaded&&installed&&newerVersion(installed,loaded)?' (완전 재시작 필요)':''}`;
+    const loaded=globalThis.CustomVoiceNative?.version,installed=info?.installedVersion;
+    version.textContent=`실행 중: ${loaded??'연결 없음'} / 설치된 native: ${installed??'확인 전'}${info?.latestVersion?' / 최신: '+info.latestVersion:''}${info?.repairRequired?' (복구 필요)':loaded&&installed&&loaded!==installed?' (완전 재시작 필요)':''}`;
     check.disabled=busy;install.disabled=busy||!info?.available||inProgress();
-    install.textContent=pending?.state==='waiting'?'Discord 종료 후 적용 예정':'구성요소 업데이트';
+    install.textContent=pending?.state==='waiting'?'적용 대기 중':info?.repairRequired?'구성요소 복구':'구성요소 업데이트';
   }
   function showState(value){
     pending=value;if(disposed)return;
-    if(value.state==='waiting')status.textContent=`native ${value.version} 다운로드 완료. Discord를 트레이에서 완전히 종료하면 자동 적용합니다. 종료 후 5초 정도 기다렸다가 다시 실행해 주세요.`;
+    if(value.state==='waiting')status.textContent=`native ${value.version}: ${value.message||'다운로드 완료. Discord를 트레이에서 완전히 종료하면 자동 적용합니다. 종료 후 5초 정도 기다렸다가 다시 실행해 주세요.'}`;
     else if(value.state==='downloading')status.textContent='native 배포 파일을 다운로드하고 있습니다…';
     else if(value.state==='applying')status.textContent='native 업데이트를 적용하고 있습니다…';
     else if(value.state==='failed')status.textContent=value.message||'native 업데이트가 중단되었습니다. 다시 시도해 주세요.';
     else if(value.state==='installed'||value.state==='current'){
-      const installed=value.version??info?.installedVersion;
-      if(info&&installed){if(!info.installedVersion||newerVersion(installed,info.installedVersion))info.installedVersion=installed;info.available=Boolean(info.latestVersion&&newerVersion(info.latestVersion,info.installedVersion));}
-      status.textContent=`native ${installed??''} 설치됨.${info?.available?' 더 새로운 버전이 있습니다.':''}`;
+      status.textContent='업데이트 작업 완료. 설치 파일을 다시 확인합니다…';
     }
     paint();schedule();
   }
   function schedule(){clearTimeout(timer);if(!disposed&&inProgress())timer=setTimeout(()=>void poll(),pending?.state==='waiting'?10000:5000);}
   async function poll(){
     if(disposed)return;if(busy){schedule();return;}const request=++revision;
-    try{const value=await bridge().nativeUpdateStatus();if(!disposed&&request===revision)showState(value);}
+    try{const value=await bridge().nativeUpdateStatus();if(!disposed&&request===revision){if(['installed','current'].includes(value.state))await refresh();else showState(value);}}
     catch(error){if(!disposed&&request===revision){status.textContent=error.message;schedule();}}
   }
   async function refresh(){
     if(disposed||busy)return;const request=++revision;clearTimeout(timer);busy=true;paint();status.textContent='GitHub에서 native 버전을 확인하고 있습니다…';
     try{
       const result=await bridge().checkNativeUpdate();if(disposed||request!==revision)return;info=result;
-      status.textContent=result.available?`native ${result.latestVersion} 업데이트가 있습니다.`:'native는 최신 버전입니다.';
-      const required='1.1.14';
+      status.textContent=result.repairRequired?(result.message||'설치 파일을 복구해야 합니다.') :result.available?`native ${result.latestVersion} 업데이트가 있습니다.`:globalThis.CustomVoiceNative?.version!==result.installedVersion?'최신 native 설치 완료. Discord를 완전히 종료한 뒤 다시 실행하면 적용됩니다.':'native는 최신 버전입니다.';
+      const required='1.1.16';
       if(newerVersion(required,result.installedVersion)&&newerVersion(required,result.latestVersion))status.textContent=`이 플러그인에 필요한 native ${required}가 정식 릴리스에 아직 없습니다. 전체 ZIP으로 업데이트해 주세요.`;
       if(result.pending&&['downloading','waiting','applying','failed'].includes(result.pending.state))showState(result.pending);
       else {pending=result.pending;clearTimeout(timer);}
@@ -59995,7 +59993,7 @@ function createNativeUpdatePanel() {
     const request=++revision;clearTimeout(timer);busy=true;paint();status.textContent='native 배포 파일을 다운로드하고 있습니다…';
     try{const value=await prepareNativeUpdateWithStatus(bridge(),info.latestVersion,()=>!disposed&&request===revision);if(!disposed&&request===revision)showState(value);}
     catch(error){if(!disposed){status.textContent=error.message;pending=undefined;}}
-    finally{busy=false;paint();}
+    finally{busy=false;paint();if(!disposed&&['installed','current'].includes(pending?.state))void refresh();}
   });
   void refresh();
   return {element,dispose(){disposed=true;++revision;clearTimeout(timer);}};
@@ -60018,7 +60016,7 @@ var CustomVoice = class {
     this.updater.start();
     void this.stopping.then(() => {
       if (generation !== this.generation || this.manager) return;
-      customVoiceLog("info", "[CustomVoice] Native capture bridge", JSON.stringify({ version: version3, adapter: "bundled", protocol: globalThis.CustomVoiceNative?.protocol ?? null, gpu: globalThis.CustomVoiceNative?.available === true, generator: typeof globalThis.MediaStreamTrackGenerator }));
+      customVoiceLog("info", "[CustomVoice] Native capture bridge", JSON.stringify({ pluginVersion: version3, nativeVersion: globalThis.CustomVoiceNative?.version ?? null, adapter: "bundled", protocol: globalThis.CustomVoiceNative?.protocol ?? null, gpu: globalThis.CustomVoiceNative?.available === true, generator: typeof globalThis.MediaStreamTrackGenerator }));
       if (!BdApi.ReactDOM?.createRoot) {
         BdApi.UI.showToast(
           "CustomVoice: ReactDOM.createRoot\uB97C \uC9C0\uC6D0\uD558\uB294 BetterDiscord \uBC84\uC804\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.",
