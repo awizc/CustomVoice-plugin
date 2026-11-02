@@ -11,6 +11,14 @@ BetterDiscord용 음성·방송 플러그인과 Windows native 캡처 도우미�
 일반 사용자는 Node.js나 .NET을 따로 설치할 필요가 없습니다.
 `CustomVoice.plugin.js`와 `CustomVoice.native` 폴더가 함께 필요하며 기존 설정은 유지합니다.
 
+## 1.1.2 첨부본 반영
+
+- 제공된 `CustomVoice.plugin.js`를 개발 및 배포 기준 파일로 반영했습니다.
+- 방송 썸네일을 서버 API로 전달하고 로그인한 사용자가 음성채널 접속 없이 조회하는 코드입니다.
+- 서버에 `POST /api/v1/screenshare/preview`, `DELETE /api/v1/screenshare/preview`, `GET /api/v1/screenshare/previews/:mediaIdentity` 구현이 필요합니다.
+- 미리보기 편집 원본 `native/voice-extras.js`도 첨부본과 동기화했습니다. native 요구 버전은 1.1.1입니다.
+- 이번 반영에서는 실행 검증·테스트 및 서버 배포를 수행하지 않았습니다.
+
 ## 1.1.0 변경 사항
 
 - 자신과 같은 채널 사용자의 접속·퇴장 효과음.

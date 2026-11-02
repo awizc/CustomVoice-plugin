@@ -43,54 +43,68 @@ var VoiceSounds = class {
 
 var BroadcastPreviews = class {
   constructor(manager){
-    this.manager=manager;this.watchers=new Map();this.cache=new Map();this.requests=new Map();this.incoming=new Map();this.revision=0;
-    this.off=watchVoiceState(manager.store,['connection','sessionChannel','mediaRevision','sharing','participants'],()=>this.sync());this.sync();
+    this.manager=manager;this.watchers=new Map();this.cache=new Map();this.requests=new Map();this.revision=0;this.closed=false;
+    this.off=watchVoiceState(manager.store,['auth','connection','sessionChannel','mediaRevision','sharing','participants'],()=>this.sync());
+    this.publisherTimer=setInterval(()=>void this.publish(),5000);this.sync();
   }
   sync(){
-    const room=this.manager.client.mediaRoom;
-    if(this.room!==room){
-      this.room?.off(RoomEvent.DataReceived,this.received);this.room=room;this.revision++;this.captureAbort?.abort();this.imageCache=undefined;this.cache.clear();for(const request of this.requests.values())clearTimeout(request.timer);this.requests.clear();this.incoming.clear();
-      this.received=(payload,participant,_kind,topic)=>{if(topic==='customvoice.preview.v1')void this.receive(payload,participant).catch(()=>{});};
-      room?.on(RoomEvent.DataReceived,this.received);
-      for(const id of this.watchers.keys())this.request(id);
+    if(this.closed)return;
+    const room=this.manager.client.mediaRoom,state=this.manager.store.get(),client=this.manager.client;
+    if(this.client!==client){this.client=client;this.cache.clear();this.requests.clear();}
+    if(this.room!==room){this.room=room;this.revision++;this.captureAbort?.abort();this.imageCache=undefined;}
+    if(!state.sharing){
+      this.imageCache=undefined;this.captureAbort?.abort();
+      if(this.broadcast){this.broadcast=undefined;void client.request('/api/v1/screenshare/preview','DELETE').catch(()=>{});}
     }
-    const state=this.manager.store.get();
-    if(!state.sharing){this.imageCache=undefined;this.captureAbort?.abort();const self=room?.localParticipant.identity;if(this.cache.delete(self))this.emit(self,{error:'방송이 종료되었습니다.'});}
-    for(const id of this.cache.keys())if(id!==room?.localParticipant.identity&&!state.participants.some(p=>p.mediaIdentity===id&&p.screenSharing)){this.cache.delete(id);this.emit(id,{error:'방송이 종료되었습니다.'});}
+    for(const id of this.cache.keys()){
+      const participant=state.participants.find(p=>p.mediaIdentity===id&&p.screenSharing);
+      if(!participant){this.cache.delete(id);this.emit(id,{error:'방송이 종료되었습니다.'});}
+    }
+    if(state.sharing)void this.publish();
   }
   emit(id,value){for(const fn of this.watchers.get(id)?.listeners??[])fn(value);}
   subscribe(id,fn){
     let entry=this.watchers.get(id);
     if(!entry){entry={listeners:new Set(),timer:setInterval(()=>{if(!document.hidden)this.request(id);},5000)};this.watchers.set(id,entry);}
-    entry.listeners.add(fn);fn(this.cache.get(id)||{});this.request(id);
-    return()=>{entry.listeners.delete(fn);if(!entry.listeners.size){clearInterval(entry.timer);this.watchers.delete(id);clearTimeout(this.requests.get(id)?.timer);this.requests.delete(id);}};
+    entry.listeners.add(fn);
+    const cached=this.cache.get(id);fn(cached&&Date.now()-Date.parse(cached.updatedAt)<20000?cached:{});this.request(id);
+    return()=>{entry.listeners.delete(fn);if(!entry.listeners.size){clearInterval(entry.timer);this.watchers.delete(id);this.requests.delete(id);}};
   }
   request(id){
-    const room=this.room;if(!room||this.manager.store.get().connection!=='Connected'){this.emit(id,{error:'음성 채널에 연결한 뒤 미리볼 수 있습니다.'});return;}
-    if(id===room.localParticipant.identity){void this.picture().then(image=>{if(image){const value={image};this.cache.set(id,value);this.emit(id,value);}}).catch(()=>this.emit(id,{error:'미리보기를 준비 중입니다.'}));return;}
-    if(!room.remoteParticipants.has(id)){this.emit(id,{error:'같은 음성 채널에 접속하면 미리볼 수 있습니다.'});return;}
-    const previous=this.requests.get(id);if(previous&&Date.now()-previous.at<3000)return;
-    clearTimeout(previous?.timer);
-    const request={id:crypto.randomUUID(),at:Date.now()};this.requests.set(id,request);
-    request.timer=setTimeout(()=>{if(this.requests.get(id)===request&&!this.cache.has(id))this.emit(id,{error:'미리보기 응답이 없습니다. 송출자도 최신 플러그인이 필요합니다.'});},4000);
-    void room.localParticipant.publishData(new TextEncoder().encode(JSON.stringify({type:'request',id:request.id})),{reliable:true,topic:'customvoice.preview.v1',destinationIdentities:[id]}).catch(()=>this.emit(id,{error:'썸네일 요청을 보내지 못했습니다.'}));
+    if(this.closed)return;
+    const state=this.manager.store.get(),client=this.manager.client;
+    if(state.auth!=='authenticated'){this.emit(id,{error:'로그인한 뒤 미리볼 수 있습니다.'});return;}
+    if(this.requests.has(id))return;
+    const request={client};this.requests.set(id,request);
+    void client.request('/api/v1/screenshare/previews/'+encodeURIComponent(id)).then(value=>{
+      if(this.closed||this.manager.client!==client||this.requests.get(id)!==request)return;
+      if(typeof value.image!=='string'||value.image.length>12000||!/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(value.image))throw Error('Invalid preview');
+      this.cache.set(id,value);this.emit(id,value);
+    }).catch(error=>{
+      if(this.closed||this.manager.client!==client||this.requests.get(id)!==request)return;
+      const cached=this.cache.get(id);
+      if(error.status!==401&&error.status!==403&&cached&&Date.now()-Date.parse(cached.updatedAt)<20000)return;
+      this.cache.delete(id);
+      this.emit(id,{error:error.status===403?'이 방송을 볼 권한이 없습니다.':error.status===401?'다시 로그인해 주세요.':'미리보기를 준비 중입니다. 송출자도 최신 플러그인이 필요합니다.'});
+    }).finally(()=>{if(this.requests.get(id)===request)this.requests.delete(id);});
   }
-  async receive(payload,participant){
-    const room=this.room;if(!room||!participant||room.remoteParticipants.get(participant.identity)!==participant||payload.byteLength>15000)return;
-    const message=JSON.parse(new TextDecoder().decode(payload));
-    if(typeof message.id!=='string'||message.id.length>64)return;
-    if(message.type==='request'){
-      if(!this.manager.store.get().sharing||Date.now()-(this.incoming.get(participant.identity)??0)<2500)return;
-      if(this.incoming.size>200)this.incoming.clear();this.incoming.set(participant.identity,Date.now());
-      const revision=this.revision,image=await this.picture();
-      if(!image||this.room!==room||this.revision!==revision||!this.manager.store.get().sharing)return;
-      await room.localParticipant.publishData(new TextEncoder().encode(JSON.stringify({type:'image',id:message.id,image})),{reliable:false,topic:'customvoice.preview.v1',destinationIdentities:[participant.identity]});
-    }else if(message.type==='image'&&this.requests.get(participant.identity)?.id===message.id){
-      if(typeof message.image!=='string'||message.image.length>12000||!/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(message.image))return;
-      if(!this.manager.store.get().participants.some(p=>p.mediaIdentity===participant.identity&&p.screenSharing))return;
-      clearTimeout(this.requests.get(participant.identity)?.timer);
-      const value={image:message.image};this.cache.set(participant.identity,value);this.emit(participant.identity,value);
-    }
+  async publish(){
+    if(this.closed||this.publishing)return;
+    const client=this.manager.client,state=this.manager.store.get(),room=this.room;
+    const publication=room?.localParticipant.getTrackPublication(Track.Source.ScreenShare),streamId=publication?.trackSid;
+    if(state.auth!=='authenticated'||!state.sharing||!streamId)return;
+    const key=room.localParticipant.identity+':'+streamId;
+    if(this.lastAttempt?.key===key&&Date.now()-this.lastAttempt.at<4500)return;
+    this.lastAttempt={key,at:Date.now()};
+    const revision=this.revision;this.publishing=true;
+    try{
+      const image=await this.picture();
+      if(!image||this.closed||this.manager.client!==client||this.room!==room||this.revision!==revision||!this.manager.store.get().sharing||room.localParticipant.getTrackPublication(Track.Source.ScreenShare)?.trackSid!==streamId)return;
+      await client.request('/api/v1/screenshare/preview','POST',{streamId,image});
+      if(this.manager.client===client&&this.room===room&&this.manager.store.get().sharing){this.broadcast=key;this.lastUpload={key,at:Date.now()};}
+      this.uploadError=undefined;
+    }catch(error){this.uploadError=String(error);}
+    finally{this.publishing=false;}
   }
   picture(){
     const room=this.room,track=room?.localParticipant.getTrackPublication(Track.Source.ScreenShare)?.track?.mediaStreamTrack;
@@ -121,7 +135,7 @@ var BroadcastPreviews = class {
       }finally{clearTimeout(timer);if(callback!==undefined)video.cancelVideoFrameCallback(callback);video.pause();video.srcObject=null;controller.abort();if(this.captureWork===work)this.captureWork=undefined;}
     })();this.captureWork=work;return work.promise;
   }
-  dispose(){this.off();this.revision++;this.captureAbort?.abort();this.room?.off(RoomEvent.DataReceived,this.received);this.room=undefined;for(const entry of this.watchers.values())clearInterval(entry.timer);for(const request of this.requests.values())clearTimeout(request.timer);this.watchers.clear();this.cache.clear();this.requests.clear();this.incoming.clear();}
+  dispose(){this.closed=true;this.off();this.revision++;this.captureAbort?.abort();clearInterval(this.publisherTimer);for(const entry of this.watchers.values())clearInterval(entry.timer);this.watchers.clear();this.cache.clear();this.requests.clear();this.room=undefined;}
 };
 
 function BroadcastThumbnail({manager,identity}){
